@@ -22,6 +22,8 @@ object Utils {
 
     def put[K, V](key: K, value: V): Unit = lock.synchronized:
       state.put(key, value)
+      println("Global state:")
+      println(state)
 
     def remove[K, V](key: K): Option[V] = lock.synchronized:
       state.remove(key).asInstanceOf[Option[V]]
