@@ -69,6 +69,7 @@ class CRDTActor(
       val key = Utils.randomString()
       val value = Utils.randomInt()
       ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+
       crdtstate = crdtstate.put(selfNode, key, value)
       ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
       broadcastAndResetDeltas()

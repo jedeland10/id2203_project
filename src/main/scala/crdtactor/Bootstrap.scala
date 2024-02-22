@@ -13,7 +13,7 @@ object Bootstrap {
 
   // Startup the actors and execute the workload
   def apply(): Unit =
-    val N_ACTORS = 8
+    val N_ACTORS = 2
 
     Utils.setLoggerLevel("INFO")
 
@@ -36,7 +36,7 @@ object Bootstrap {
     actors.foreach((_, actorRef) => actorRef ! CRDTActor.Start)
 
     // Sleep for a few seconds, then quit :)
-    Thread.sleep(5000)
+    Thread.sleep(100)
 
     // Force quit
     System.exit(0)
