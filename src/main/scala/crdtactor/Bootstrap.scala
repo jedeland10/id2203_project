@@ -15,7 +15,7 @@ object Bootstrap {
   def apply(): Unit =
     val N_ACTORS = 2
 
-    Utils.setLoggerLevel("INFO")
+    Utils.setLoggerLevel("DEBUG")
 
     val system = ActorSystem("CRDTActor")
 
