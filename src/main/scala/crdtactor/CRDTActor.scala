@@ -13,6 +13,11 @@ import org.apache.pekko.actor.typed.ActorRef
 import collection.mutable
 
 object CRDTActor {
+  // State return value for write/read requests of leases
+  sealed trait State
+  case object Commit extends State
+  case object Abort extends State
+
   // The type of messages that the actor can handle
   sealed trait Command
 
@@ -26,10 +31,14 @@ object CRDTActor {
   // Triggers the actor to consume an operation (do this repeatedly!)
   case object ConsumeOperation extends Command
 
-  case class RequestLocks(sender: ActorRef[Command]) extends Command
-  case class GrantLock(key: ActorRef[Command], value: Boolean) extends Command
-  case class ReleaseLocks() extends Command
-  case class ReturnLock() extends Command
+  case class Read(from: ActorRef[Command], k: Long) extends Command
+  case class Write(from: ActorRef[Command], k: Long, v: mutable.Map[Int, Long]) extends Command
+
+  case class AckRead(from: ActorRef[Command], k: Long, kPrim: Long, v: mutable.Map[Int, Long]) extends Command
+  case class NackRead(from: ActorRef[Command], k: Long) extends Command
+  
+  case class AckWrite(from: ActorRef[Command], k: Long) extends Command
+  case class NackWrite(from: ActorRef[Command], k: Long) extends Command
 }
 
 import CRDTActor.*
@@ -49,6 +58,17 @@ class CRDTActor(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
+  private var read = 0L;
+  private var write = 0L;
+  private var vi = mutable.Map.empty[Int, Long];
+
+
+  private val ackReadResponses: mutable.Map[Long, mutable.Map[Int,Long]] = mutable.Map.empty[Long, mutable.Map[Int,Long]];
+  private val nackReadResponses = List.empty[Long];
+  
+  private val ackWriteResponses = List.empty[Long];;
+  private val nackWriteResponses = List.empty[Long];;
+
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
     val deltaOption = crdtstate.delta
@@ -61,99 +81,107 @@ class CRDTActor(
             actorRef !
               DeltaMsg(ctx.self, delta)
         }
+    
+  private def read(k: Long): (State, mutable.Map[Int, Long]) = {
+    others.foreach {
+      (_, actorRef) =>
+        actorRef ! Read(ctx.self, k);
+    }
 
-  //private var localLock: Map[String, Boolean] = Map("hasLock" -> true)
-  private var localLock: Boolean = true
-  private val lockMap: mutable.Map[ActorRef[Command], Boolean] = mutable.Map.empty[ActorRef[Command], Boolean]
-  private var isInCs: Boolean = false
-  private var token: Boolean = false
+
+    /*
+    def handleResponses(ackCount: Int, nackCount: Int, resultMap: mutable.Map[Int, Long]): Unit = {
+
+      if (ackCount >= (others.size + 1) / 2) {
+        if (nackCount >= 1) {
+
+        }
+      } else if (nackCount >= (others.size + 1) / 2) {
+
+      } else {
+
+      }
+    }
+    handleResponses(0, 0, mutable.Map.empty)*/
+
+    // Wait until received Ackread or Nackread from (n + 1) / 2 processes
+
+    // if received at least 1 NackRead(k) return (State.Abort, mutable.Map.empty[Int, Long])
+    // else select AckRead(k, kPrim, v) with highest kPrim and return (State.Commit, v)
+    (Abort, mutable.Map.empty)
+  }
+
+        
   
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
-    case Start =>
+    case Start => {
       ctx.log.info(s"CRDTActor-$id started")
-      if (id == 0) {
-        token = true
-      }
       ctx.self ! ConsumeOperation // start consuming operations
       Behaviors.same
+    }
 
-    case ConsumeOperation =>
-      if (localLock && token) {
-        others.foreach { //Filter in others so that nodes in lockMap is removed as well as self!
-            (name, actorRef) =>
-            if (actorRef != ctx.self && !lockMap.isDefinedAt(actorRef)) {
-              actorRef ! RequestLocks(ctx.self)
-            }
-          }
-        isInCs = true
-        //Create a sync function!!!
-        ctx.log.info(s"CRDTActor-$id: Size of others: ${others.size}")
-        ctx.log.info(s"CRDTActor-$id: Size of lockMap: ${lockMap.size}")
-        if (lockMap.size == others.size) {
-          ctx.log.info(s"CRDTActor-$id: I have the lock!")
-          val key = Utils.randomString()
-          val value = Utils.randomInt()
-          ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-          crdtstate = crdtstate.put(selfNode, key, value)
-          ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-          broadcastAndResetDeltas()
-          ctx.log.info(s"CRDTActor-$id: I now release the locks")
-          lockMap.clear()
-          isInCs = false
-        }
-        if (isInCs == false) {
-          others.foreach {
-            (name, actorRef) =>
-              actorRef ! ReturnLock()
-          }
-        }
-      }
+    case ConsumeOperation => {
+      val key = Utils.randomString()
+      val value = Utils.randomInt()
+      ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+      crdtstate = crdtstate.put(selfNode, key, value)
+      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+      broadcastAndResetDeltas()
       ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
       Behaviors.same
+    }
 
-    case DeltaMsg(from, delta) =>
+    case DeltaMsg(from, delta) => {
       ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
       Behaviors.same
+    }
 
-    case RequestLocks(sender) =>
-      //ctx.log.info(s"CRDTActor-$id: Someone wants my lock!")
-      //If I have my lock, give it away otherwise send NO
-      if (localLock && lockMap.size == 0) { //Filter so no true val is in map
-        ctx.log.info(s"CRDTActor-$id: Sending my lock")
-        sender ! GrantLock(ctx.self, true)
-        //TODO SEND STATE ALSO
-        localLock = false;
-      } else {
-        ctx.log.info(s"CRDTActor-$id: I wont send you my lock")
-        sender ! GrantLock(ctx.self, false)
+    case Read(from, k) => {
+      ctx.log.info(s"CRDTActor-$id: Received Read from id ${from.path.name}")
+      if (write >= k || read >= k) {
+        from ! NackRead(ctx.self, k);
+      }
+      else{
+        read = k;
+        from ! AckRead(ctx.self, k, write, vi);
       }
       Behaviors.same
+    }
 
-    case GrantLock(key, value) => //this is exceuted in the requester
-      //ADDING TO lockMap doesnt work
-      lockMap(key) = value
-      //lockMap = lockMap + (key -> value)
-      //localLock = true;
-      //localLock = localLock.updated("hasLock", false)
-      //If we have a map with the length of the number of processors and all returend true, we have the lock and can execute
+    case Write(from, k, v) => {
+      ctx.log.info(s"CRDTActor-$id: Received write from id ${from.path.name}")
+      if (write > k || read > k) {
+        from ! NackWrite(ctx.self, k);
+      }
+      else {
+        write = k;
+        vi = v;
+        from ! AckWrite(ctx.self, k);
+      }
       Behaviors.same
+    }
 
-    // case ReleaseLocks() =>
-    //   //iterate over lockMap and send a message to all agents in the map
-    //   for (agents <- lockMap)
-    //     agents._1 ! ReturnLock()
-    //     lockMap - agents._2
-    //   Behaviors.same
-
-    case ReturnLock() =>
-      localLock = true;
+    case AckRead(from, k, kPrim, v) => {
+      ackReadResponses(kPrim) = v;
       Behaviors.same
-      //localLock = localLock.updated("hasLock", true)
+    }
+    case NackRead(from, k) => {
+      nackReadResponses.appended(k);
+      Behaviors.same
+    }
+    case AckWrite(from, k) => {
+      ackWriteResponses.appended(k);
+      Behaviors.same
+    }
+    case NackWrite(from, k) => {
+      nackWriteResponses.appended(k)
+      Behaviors.same
+    }
 
   Behaviors.same
 }
