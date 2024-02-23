@@ -106,10 +106,10 @@ class CRDTActor(
           lockMap.clear()
         }
         others.foreach {
-            (name, actorRef) =>
-              actorRef !
-                ReturnLock()
-          }
+          (name, actorRef) =>
+            actorRef !
+              ReturnLock()
+        }
       }
       ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
       Behaviors.same
