@@ -1,0 +1,5 @@
+Algorithms to use:
+    - Fleases, full version for loosley synchronized clocks (because we need to work in the crash-recovery model)
+    - Some sort of synch algorithm for the CRDTS that should be executed directly after the lease has been aquired
+    - Have a look at the current merge functionality, isn't it working correctly?
+    - Broadcast, what type of broadcast is it?
