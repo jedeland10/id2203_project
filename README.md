@@ -57,7 +57,7 @@ Process {
 ## Grading Checklist
 
 Preparatory tasks:
-- [ ] You have read the “ID2203 –Distributed Systems, Advanced - Course Project – VT24 P3” document, and read the “Grading” information.
+- [X] You have read the “ID2203 –Distributed Systems, Advanced - Course Project – VT24 P3” document, and read the “Grading” information.
 
 Mandatory project tasks:
 - [ ] Your project has implemented sequentially consistent operations on top of CvRDTs.
@@ -79,8 +79,8 @@ Mandatory project tasks:
 - [ ] You have put in an appropriate amount of effort.
 
 Mandatory administrative tasks:
-- [ ] You have registered your project.
-- [ ] You have formed a group and created a shared repository.
+- [X] You have registered your project.
+- [X] You have formed a group and created a shared repository.
 - [ ] You have handed in a project report (PDF).
 - [ ] You have given the *Oral Presentation* for your project.
 
@@ -101,3 +101,20 @@ sbt run
 
 ## Further Notes
 Your project should implement a key-value store interface with "on-demand" sequentially consistent operations. It should provide a key-value store interface, . There should be several parallel/distributed actors that each handle operations for this key-value store (based on eventually consistent CRDTs). Additionally to this, there should be a way to execute a set of operations in a sequentially consistent manner. Not all operations need to be sequentially consistent, only grouped operations that are marked as `Atomic` should be executed in a sequentially consistent manner w.r.t. all other operations.
+
+
+IDEA: 
+case RequestLocks(sender) =>
+  if (localLock && lockMap.isEmpty) {
+    val newBehavior = new GrantLockBehavior(sender, true)
+    localLock = false // Set true elsewhere if needed
+    newBehavior
+  } else {
+    sender ! GrantLock(ctx.self, false)
+    Behaviors.same
+  }
+
+class GrantLockBehavior(sender: ActorRef[Command], granted: Boolean) extends AbstractBehavior[Command](ctx) {
+  // Handle further behavior related to granting the lock
+  ...
+}

@@ -10,6 +10,7 @@ import org.apache.pekko.cluster.ddata.ReplicatedData
 import org.apache.pekko.cluster.ddata.ReplicatedDelta
 import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
+import collection.mutable
 
 object CRDTActor {
   // The type of messages that the actor can handle
@@ -24,6 +25,11 @@ object CRDTActor {
 
   // Triggers the actor to consume an operation (do this repeatedly!)
   case object ConsumeOperation extends Command
+
+  case class RequestLocks(sender: ActorRef[Command]) extends Command
+  case class GrantLock(key: ActorRef[Command], value: Boolean) extends Command
+  case class ReleaseLocks() extends Command
+  case class ReturnLock() extends Command
 }
 
 import CRDTActor.*
@@ -56,23 +62,55 @@ class CRDTActor(
               DeltaMsg(ctx.self, delta)
         }
 
+  //private var localLock: Map[String, Boolean] = Map("hasLock" -> true)
+  private var localLock: Boolean = true
+  private val lockMap: mutable.Map[ActorRef[Command], Boolean] = mutable.Map.empty[ActorRef[Command], Boolean]
+  private var isInCs: Boolean = false
+  private var token: Boolean = false
+  
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case Start =>
       ctx.log.info(s"CRDTActor-$id started")
+      if (id == 0) {
+        token = true
+      }
       ctx.self ! ConsumeOperation // start consuming operations
       Behaviors.same
 
     case ConsumeOperation =>
-      val key = Utils.randomString()
-      val value = Utils.randomInt()
-      ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-
-      crdtstate = crdtstate.put(selfNode, key, value)
-      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-      broadcastAndResetDeltas()
+      if (localLock && token) {
+        others.foreach { //Filter in others so that nodes in lockMap is removed as well as self!
+            (name, actorRef) =>
+            if (actorRef != ctx.self && !lockMap.isDefinedAt(actorRef)) {
+              actorRef ! RequestLocks(ctx.self)
+            }
+          }
+        isInCs = true
+        //Create a sync function!!!
+        ctx.log.info(s"CRDTActor-$id: Size of others: ${others.size}")
+        ctx.log.info(s"CRDTActor-$id: Size of lockMap: ${lockMap.size}")
+        if (lockMap.size == others.size) {
+          ctx.log.info(s"CRDTActor-$id: I have the lock!")
+          val key = Utils.randomString()
+          val value = Utils.randomInt()
+          ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+          crdtstate = crdtstate.put(selfNode, key, value)
+          ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+          broadcastAndResetDeltas()
+          ctx.log.info(s"CRDTActor-$id: I now release the locks")
+          lockMap.clear()
+          isInCs = false
+        }
+        if (isInCs == false) {
+          others.foreach {
+            (name, actorRef) =>
+              actorRef ! ReturnLock()
+          }
+        }
+      }
       ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
       Behaviors.same
 
@@ -81,5 +119,41 @@ class CRDTActor(
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
       Behaviors.same
+
+    case RequestLocks(sender) =>
+      //ctx.log.info(s"CRDTActor-$id: Someone wants my lock!")
+      //If I have my lock, give it away otherwise send NO
+      if (localLock && lockMap.size == 0) { //Filter so no true val is in map
+        ctx.log.info(s"CRDTActor-$id: Sending my lock")
+        sender ! GrantLock(ctx.self, true)
+        //TODO SEND STATE ALSO
+        localLock = false;
+      } else {
+        ctx.log.info(s"CRDTActor-$id: I wont send you my lock")
+        sender ! GrantLock(ctx.self, false)
+      }
+      Behaviors.same
+
+    case GrantLock(key, value) => //this is exceuted in the requester
+      //ADDING TO lockMap doesnt work
+      lockMap(key) = value
+      //lockMap = lockMap + (key -> value)
+      //localLock = true;
+      //localLock = localLock.updated("hasLock", false)
+      //If we have a map with the length of the number of processors and all returend true, we have the lock and can execute
+      Behaviors.same
+
+    // case ReleaseLocks() =>
+    //   //iterate over lockMap and send a message to all agents in the map
+    //   for (agents <- lockMap)
+    //     agents._1 ! ReturnLock()
+    //     lockMap - agents._2
+    //   Behaviors.same
+
+    case ReturnLock() =>
+      localLock = true;
+      Behaviors.same
+      //localLock = localLock.updated("hasLock", true)
+
   Behaviors.same
 }
