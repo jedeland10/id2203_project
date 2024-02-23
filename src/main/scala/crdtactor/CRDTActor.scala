@@ -10,7 +10,6 @@ import org.apache.pekko.cluster.ddata.ReplicatedData
 import org.apache.pekko.cluster.ddata.ReplicatedDelta
 import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
-import collection.mutable
 
 object CRDTActor {
   // The type of messages that the actor can handle
@@ -26,10 +25,17 @@ object CRDTActor {
   // Triggers the actor to consume an operation (do this repeatedly!)
   case object ConsumeOperation extends Command
 
-  case class RequestLocks(sender: ActorRef[Command]) extends Command
-  case class GrantLock(key: ActorRef[Command], value: Boolean) extends Command
-  case class ReleaseLocks() extends Command
-  case class ReturnLock() extends Command
+  case class Read(k: Int, sender: ActorRef[Command]) extends Command
+
+  case class Write(k: Int, v: (Int, Long) , sender: ActorRef[Command]) extends Command
+
+  case class AckRead(k: Int, writej: Int, v: (Int, Long)) extends Command
+
+  case class NackRead(k: Int) extends Command
+
+  case class AckWrite(k: Int) extends Command
+
+  case class NackWrite(k: Int) extends Command
 }
 
 import CRDTActor.*
@@ -49,6 +55,16 @@ class CRDTActor(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
+  private var write: Int = 0
+  private var read: Int = 0
+  private var vi: (Int, Long) = null //TODO, should be empty
+  private var ackVotes: Int = 0
+  private var nackVotes: Int = 0
+  private var highestK: Int = 0
+  private var tempV: (Int, Long) = (0,0)
+  private var ki: Int = id
+
+
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
     val deltaOption = crdtstate.delta
@@ -62,98 +78,168 @@ class CRDTActor(
               DeltaMsg(ctx.self, delta)
         }
 
-  //private var localLock: Map[String, Boolean] = Map("hasLock" -> true)
-  private var localLock: Boolean = true
-  private val lockMap: mutable.Map[ActorRef[Command], Boolean] = mutable.Map.empty[ActorRef[Command], Boolean]
-  private var isInCs: Boolean = false
-  private var token: Boolean = false
-  
+  private def readFunc(k: Int): Unit = {
+    ackVotes = 0
+    nackVotes = 0
+    highestK = 0
+    others.foreach {
+          (name, actorRef) =>
+          if (actorRef != ctx.self) {
+            actorRef ! Read(k, ctx.self)
+          }
+        }
+  }
+
+  private def writeFunc(k: Int, v: (Int,Long)): Unit = {
+    ackVotes = 0
+    nackVotes = 0
+    others.foreach {
+          (name, actorRef) =>
+          if (actorRef != ctx.self) {
+            actorRef ! Write(k, v, ctx.self)
+          }
+        }
+  }
+
+  //This is my getLease function
+  private def commit(v: (Int, Long)): Unit = {
+    ctx.log.info(s"CRDTActor-$id: Inside the commit func")
+    if (v != null) {
+      if (v._2 < System.currentTimeMillis() && (v._2 + 500) > System.currentTimeMillis()) {
+        ki = ki + 1
+        Thread.sleep(500)
+        ctx.self ! ConsumeOperation // start consuming operations
+        Behaviors.same
+      }
+    }
+    if (v == null) { //Add check for time now later
+      writeFunc(ki, (ki,System.currentTimeMillis() + 1000))
+    } else if (v._2 < System.currentTimeMillis()) {
+      println("v._2: " + v._2)
+      println("v._1: " + v._1)
+      println("v: " + v)
+      writeFunc(ki, (ki,System.currentTimeMillis() + 1000))
+    } else if (v._1 == ki) {
+      writeFunc(ki, (ki,System.currentTimeMillis() + 1000))
+    }
+
+      // ctx.log.info(s"CRDTActor-$id: acks: $ackVotes - nacks: $nackVotes")
+      // val key = Utils.randomString()
+      // val value = Utils.randomInt()
+      // ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+      // crdtstate = crdtstate.put(selfNode, key, value)
+      // ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+      // broadcastAndResetDeltas()
+      //ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+    Behaviors.same
+  }
+
+  private def writeCommit(): Unit = {
+    //SYNC then do this
+    //ctx.log.info(s"CRDTActor-$id: acks: $ackVotes - nacks: $nackVotes")
+    val key = Utils.randomString()
+    val value = Utils.randomInt()
+    ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+    crdtstate = crdtstate.put(selfNode, key, value)
+    ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+    broadcastAndResetDeltas()
+    ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+    Behaviors.same
+  }
+
+
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
   // do better by not sending as many delta update messages
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case Start =>
       ctx.log.info(s"CRDTActor-$id started")
-      if (id == 0) {
-        token = true
-      }
       ctx.self ! ConsumeOperation // start consuming operations
       Behaviors.same
 
     case ConsumeOperation =>
-      if (localLock && token) {
-        others.foreach { //Filter in others so that nodes in lockMap is removed as well as self!
-            (name, actorRef) =>
-            if (actorRef != ctx.self && !lockMap.isDefinedAt(actorRef)) {
-              actorRef ! RequestLocks(ctx.self)
-            }
-          }
-        isInCs = true
-        //Create a sync function!!!
-        ctx.log.info(s"CRDTActor-$id: Size of others: ${others.size}")
-        ctx.log.info(s"CRDTActor-$id: Size of lockMap: ${lockMap.size}")
-        if (lockMap.size == others.size) {
-          ctx.log.info(s"CRDTActor-$id: I have the lock!")
-          val key = Utils.randomString()
-          val value = Utils.randomInt()
-          ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-          crdtstate = crdtstate.put(selfNode, key, value)
-          ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-          broadcastAndResetDeltas()
-          ctx.log.info(s"CRDTActor-$id: I now release the locks")
-          lockMap.clear()
-          isInCs = false
-        }
-        if (isInCs == false) {
-          others.foreach {
-            (name, actorRef) =>
-              actorRef ! ReturnLock()
-          }
-        }
-      }
-      ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+      readFunc(ki)
       Behaviors.same
+    
 
     case DeltaMsg(from, delta) =>
-      ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
+      //ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
+      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
       Behaviors.same
-
-    case RequestLocks(sender) =>
-      //ctx.log.info(s"CRDTActor-$id: Someone wants my lock!")
-      //If I have my lock, give it away otherwise send NO
-      if (localLock && lockMap.size == 0) { //Filter so no true val is in map
-        ctx.log.info(s"CRDTActor-$id: Sending my lock")
-        sender ! GrantLock(ctx.self, true)
-        //TODO SEND STATE ALSO
-        localLock = false;
+    
+    case Read(k, sender) =>
+      // println("This is our k value in Read event: " + k)
+      // println("And our write: " + write + ", and read: " + read)
+      if(write >= k || read >= k) {
+        sender ! NackRead(k)
       } else {
-        ctx.log.info(s"CRDTActor-$id: I wont send you my lock")
-        sender ! GrantLock(ctx.self, false)
+        read = k
+        sender ! AckRead(k,write,vi)
+      }
+      Behaviors.same
+    
+
+    case Write(k, v, sender) => 
+      if (write > k || read > k) {
+        sender ! NackWrite(k)
+      } else {
+        write = k
+        vi = v
+        sender ! AckWrite(k)
+      }
+      Behaviors.same
+    
+
+    case NackRead(k) => 
+      nackVotes = nackVotes + 1
+      if (nackVotes > (others.size/2)) {
+        //abort
+        ctx.self ! ConsumeOperation // start consuming operations
+        Behaviors.same
+      }
+      Behaviors.same
+    
+
+    case AckRead(k, writej, v) => 
+      ackVotes = ackVotes + 1
+      if (writej > highestK) {
+        highestK = writej
+        tempV = v
+      }
+      if (ackVotes > (others.size/2) && nackVotes == 0) {
+        commit(tempV)
+        // ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+        // Behaviors.same
+      } else if(ackVotes > (others.size/2) && nackVotes > 0) {
+        ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+        Behaviors.same
+      }
+      Behaviors.same
+    
+
+    case NackWrite(k) => 
+      nackVotes = nackVotes + 1
+      if (nackVotes > (others.size/2)) {
+        //abort
+        ctx.self ! ConsumeOperation // start consuming operations
+        Behaviors.same
       }
       Behaviors.same
 
-    case GrantLock(key, value) => //this is exceuted in the requester
-      //ADDING TO lockMap doesnt work
-      lockMap(key) = value
-      //lockMap = lockMap + (key -> value)
-      //localLock = true;
-      //localLock = localLock.updated("hasLock", false)
-      //If we have a map with the length of the number of processors and all returend true, we have the lock and can execute
+    case AckWrite(k) => 
+      ackVotes = ackVotes + 1
+      if (ackVotes > (others.size/2) && nackVotes == 0) {
+        //WRITE IS DONE LETSS GO
+        //CALL ON LETS GO FUNCTION
+        writeCommit()
+      } else if(ackVotes > (others.size/2) && nackVotes > 0) {
+        //Restart
+        ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+        Behaviors.same
+      }
       Behaviors.same
-
-    // case ReleaseLocks() =>
-    //   //iterate over lockMap and send a message to all agents in the map
-    //   for (agents <- lockMap)
-    //     agents._1 ! ReturnLock()
-    //     lockMap - agents._2
-    //   Behaviors.same
-
-    case ReturnLock() =>
-      localLock = true;
-      Behaviors.same
-      //localLock = localLock.updated("hasLock", true)
 
   Behaviors.same
 }

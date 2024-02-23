@@ -3,3 +3,7 @@ Algorithms to use:
     - Some sort of synch algorithm for the CRDTS that should be executed directly after the lease has been aquired
     - Have a look at the current merge functionality, isn't it working correctly?
     - Broadcast, what type of broadcast is it?
+
+Documentation:
+- 23 feb, Tried to implmented FLEASE. But there is an issue, at the moment commit phase (where we actually write to the 
+CRDTs are only being exectued once). Spent all day trying to make it work, but not fully there yet.
