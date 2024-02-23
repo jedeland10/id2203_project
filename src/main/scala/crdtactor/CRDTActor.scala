@@ -65,6 +65,8 @@ class CRDTActor(
   //private var localLock: Map[String, Boolean] = Map("hasLock" -> true)
   private var localLock: Boolean = true
   private val lockMap: mutable.Map[ActorRef[Command], Boolean] = mutable.Map.empty[ActorRef[Command], Boolean]
+  private var isInCs: Boolean = false
+  private var token: Boolean = false
   
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
@@ -72,18 +74,21 @@ class CRDTActor(
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case Start =>
       ctx.log.info(s"CRDTActor-$id started")
+      if (id == 0) {
+        token = true
+      }
       ctx.self ! ConsumeOperation // start consuming operations
       Behaviors.same
 
     case ConsumeOperation =>
-      //Start by locking so no other processor can execute the same part of the code
-      //Sync CRDTs state with all other processors
-      if (localLock) {
+      if (localLock && token) {
         others.foreach { //Filter in others so that nodes in lockMap is removed as well as self!
             (name, actorRef) =>
-              actorRef !
-                RequestLocks(ctx.self)
+            if (actorRef != ctx.self && !lockMap.isDefinedAt(actorRef)) {
+              actorRef ! RequestLocks(ctx.self)
+            }
           }
+        isInCs = true
         //Create a sync function!!!
         ctx.log.info(s"CRDTActor-$id: Size of others: ${others.size}")
         ctx.log.info(s"CRDTActor-$id: Size of lockMap: ${lockMap.size}")
@@ -97,12 +102,14 @@ class CRDTActor(
           broadcastAndResetDeltas()
           ctx.log.info(s"CRDTActor-$id: I now release the locks")
           lockMap.clear()
+          isInCs = false
         }
-        others.foreach {
+        if (isInCs == false) {
+          others.foreach {
             (name, actorRef) =>
-              actorRef !
-                ReturnLock()
+              actorRef ! ReturnLock()
           }
+        }
       }
       ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
       Behaviors.same
@@ -117,10 +124,12 @@ class CRDTActor(
       //ctx.log.info(s"CRDTActor-$id: Someone wants my lock!")
       //If I have my lock, give it away otherwise send NO
       if (localLock && lockMap.size == 0) { //Filter so no true val is in map
+        ctx.log.info(s"CRDTActor-$id: Sending my lock")
         sender ! GrantLock(ctx.self, true)
         //TODO SEND STATE ALSO
         localLock = false;
       } else {
+        ctx.log.info(s"CRDTActor-$id: I wont send you my lock")
         sender ! GrantLock(ctx.self, false)
       }
       Behaviors.same
