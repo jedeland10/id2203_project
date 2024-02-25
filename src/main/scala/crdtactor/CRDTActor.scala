@@ -65,6 +65,9 @@ class CRDTActor(
   private var tempV: (Int, Long) = (0,0)
   private var ki: Int = id
 
+  private var waitingForR: Boolean = false
+  private var waitingForW: Boolean = false
+
 
   // Note: you probably want to modify this method to be more efficient
   //TODO: atm it broadcasts the whole crdt, make it more efficient by only broadcasting what should be added!!
@@ -86,6 +89,7 @@ class CRDTActor(
     ackVotes = 0
     nackVotes = 0
     highestK = 0
+    waitingForR = true
     others.foreach {
           (name, actorRef) =>
             if (actorRef != ctx.self) {
@@ -97,6 +101,7 @@ class CRDTActor(
   private def writeFunc(k: Int, v: (Int,Long)): Unit = {
     ackVotes = 0
     nackVotes = 0
+    waitingForW = true
     others.foreach {
           (name, actorRef) =>
             if (actorRef != ctx.self) {
@@ -107,28 +112,32 @@ class CRDTActor(
 
   //This is my getLease function
   private def commit(v: (Int, Long)): Unit = {
-    ctx.log.info(s"CRDTActor-$id: Inside the commit func with v: " + v)
+    //ctx.log.info(s"CRDTActor-$id: Inside the commit func with v: " + v)
     if (v != null) {
-      if (v._2 < Clock.systemDefaultZone().millis() && (v._2 + 500) > Clock.systemDefaultZone().millis()) {
-        ctx.log.info(s"CRDTActor-$id: NEver comes here?")
+      if (v._2 < java.time.Instant.now().toEpochMilli() && (v._2 + 50) > java.time.Instant.now().toEpochMilli()) {
+        ctx.log.info(s"CRDTActor-$id: Never comes here?")
         //ki = read + 1
-        Thread.sleep(500)
+        Thread.sleep(50)
         ctx.self ! ConsumeOperation // start consuming operations
         Behaviors.same
       }
     }
-    if (v == null) { //Add check for time now later
+    if (v == (0,0)) { //Add check for time now later
       ctx.log.info(s"CRDTActor-$id: Not null right")
-      writeFunc(ki, (id,Clock.systemDefaultZone().millis() + 1000))
-    } else if (v._2 < Clock.systemDefaultZone().millis()) {
-      ctx.log.info(s"CRDTActor-$id: Do i have the time?")
-      writeFunc(ki, (id,Clock.systemDefaultZone().millis() + 1000))
-    } else if (v._1 == id) {
-      ctx.log.info(s"CRDTActor-$id: renew")
-      writeFunc(ki, (id,Clock.systemDefaultZone().millis() + 1000))
+      writeFunc(ki, (id,java.time.Instant.now().toEpochMilli() + 100))
+    } else if (v._2 < java.time.Instant.now().toEpochMilli()) {
+      ctx.log.info(s"CRDTActor-$id: v._2: " + v._2)
+      ctx.log.info(s"CRDTActor-$id: current time: " + java.time.Instant.now().toEpochMilli())
+      writeFunc(ki, (id,java.time.Instant.now().toEpochMilli() + 100))
+    } 
+    //else if (v._1 == id) {
+    //   ctx.log.info(s"CRDTActor-$id: renew")
+    //   writeFunc(ki, (id,java.time.Instant.now().toEpochMilli() + 100))
+    // } 
+    else {
+      ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+      Behaviors.same
     }
-    ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
-    Behaviors.same
   }
 
   private def writeCommit(): Unit = {
@@ -193,56 +202,76 @@ class CRDTActor(
     
 
     case NackRead(k) => 
-      nackVotes = nackVotes + 1
-      if (nackVotes >= ((others.size+1)/2)) {
-        ki = read + 1
-        //abort
-        //Alt ki + 1
-        //ctx.log.info(s"CRDTActor-$id:got denied with ki of: " + ki)
-        ctx.self ! ConsumeOperation // start consuming operations
-        Behaviors.same
+      if (waitingForR) {
+        nackVotes = nackVotes + 1
+        if (nackVotes >= ((others.size+1)/2)) {
+          ki = read + 1
+          // nackVotes = 0
+          // ackVotes = 0
+          //abort
+          //Alt ki + 1
+          //ctx.log.info(s"CRDTActor-$id:got denied with ki of: " + ki)
+          waitingForR = false
+          ctx.self ! ConsumeOperation // start consuming operations
+          //Behaviors.same
+        }
       }
       Behaviors.same
     
 
     case AckRead(k, writej, v) => 
-      //ctx.log.info(s"CRDTActor-$id:got an ackread with ki of: " + ki)
-      ackVotes = ackVotes + 1
-      if (writej > highestK) {
-        highestK = writej
-        tempV = v
-      }
-      if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
-        commit(tempV)
-        // ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
-        // Behaviors.same
-      } else if(ackVotes >= (((others.size+1)/2)) && nackVotes > 0) {
-        ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
-        Behaviors.same
+      if (waitingForR) {
+        //ctx.log.info(s"CRDTActor-$id:got an ackread with ki of: " + ki)
+        ackVotes = ackVotes + 1
+        if (writej > highestK) {
+          highestK = writej
+          tempV = v
+        }
+        if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
+          // ackVotes = 0
+          // nackVotes = 0
+          waitingForR = false
+          commit(tempV)
+          // ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+          // Behaviors.same
+        } else if(ackVotes >= (((others.size+1)/2)) && nackVotes > 0) {
+          waitingForR = false
+          ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+          Behaviors.same
+        }
       }
       Behaviors.same
     
 
     case NackWrite(k) => 
-      nackVotes = nackVotes + 1
-      if (nackVotes >= (((others.size+1)/2))) {
-        //abort
-        //ki = write + 1
-        ctx.self ! ConsumeOperation // start consuming operations
-        Behaviors.same
+      if (waitingForW) {
+        nackVotes = nackVotes + 1
+        if (nackVotes >= (((others.size+1)/2))) {
+          // nackVotes = 0
+          // ackVotes = 0
+          //abort
+          //ki = write + 1
+          waitingForR = false
+          ctx.self ! ConsumeOperation // start consuming operations
+          //Behaviors.same
+        }
       }
       Behaviors.same
 
     case AckWrite(k) => 
-      ackVotes = ackVotes + 1
-      if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
-        //WRITE IS DONE LETSS GO
-        //CALL ON LETS GO FUNCTION
-        writeCommit()
-      } else if(ackVotes >= (((others.size+1)/2)) && nackVotes > 0) {
-        //Restart
-        ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
-        Behaviors.same
+      if (waitingForW) {
+        ackVotes = ackVotes + 1
+        if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
+          // ackVotes = 0
+          // nackVotes = 0
+          waitingForR = false
+          writeCommit()
+        } else if(ackVotes >=(((others.size+1)/2)) && nackVotes > 0) {
+          //Restart
+          waitingForR = false
+          ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+          Behaviors.same
+        }
       }
       Behaviors.same
 

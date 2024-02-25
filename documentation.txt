@@ -1,0 +1,15 @@
+For push 16:22 (Sunday) (Git message: Removed renewal)
+    1. I removed so that is not possible to renew the lease, the have to wait for the lease to be free.
+    The problem is otherwise the the leaseholder will continously renew their lease before it runs out.
+    This works ok because processors are constanty asking for the lease atm
+    2. I also changed from Clock.systemDefaultZone().millis() to java.time.Instant.now().toEpochMilli() because the latter focuses only on the timeline
+    and therefore should be better for our need.
+    3. I also changed the ordering of calling on ctx.self ! ConsumeOperation
+    4. Furthermore I added a boolean to track if a node where expecting more acks/nacks, because previoulsy that caused issues for me. No once they have taking a decision
+    they wont be affected by late replys, these will be discarded.
+    5. Lastly I played around with setting the lease times, still not sure about what is good here
+
+    Result: Seems to work, but the amount of writes to the CRDTs are really random. Sometimes the have enough time to write only two values
+    and other times the write more than 10...
+
+    Issue: The Ki goes up to 12499, which is neccesserarly not a problem but im to figure out if it would be a problem
