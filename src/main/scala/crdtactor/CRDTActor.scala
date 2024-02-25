@@ -12,11 +12,17 @@ import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
 import collection.mutable
 
+// using ? to send message, ask
+import org.apache.pekko.actor.typed.scaladsl.AskPattern.Askable
+import org.apache.pekko.util.Timeout
+import scala.concurrent.duration._
+
 object CRDTActor {
   // State return value for write/read requests of leases
   sealed trait State
   case object Commit extends State
   case object Abort extends State
+  case object Unknown extends State
 
   // The type of messages that the actor can handle
   sealed trait Command
@@ -58,16 +64,16 @@ class CRDTActor(
   private lazy val others =
     Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
-  private var read = 0L;
-  private var write = 0L;
-  private var vi = mutable.Map.empty[Int, Long];
+  private var read = 0L; // Latest read timestamp
+  private var write = 0L; // Latest write timestamp
+  private var vi = mutable.Map.empty[Int, Long]; // Latest lease process coupled with timestamp
 
 
   private val ackReadResponses: mutable.Map[Long, mutable.Map[Int,Long]] = mutable.Map.empty[Long, mutable.Map[Int,Long]];
-  private val nackReadResponses = List.empty[Long];
+  private val nackReadResponses: mutable.Map[ActorRef[Command],Long] = mutable.Map.empty[ActorRef[Command], Long];
   
-  private val ackWriteResponses = List.empty[Long];;
-  private val nackWriteResponses = List.empty[Long];;
+  private val ackWriteResponses: mutable.Map[ActorRef[Command],Long] = mutable.Map.empty[ActorRef[Command], Long];
+  private val nackWriteResponses: mutable.Map[ActorRef[Command],Long] = mutable.Map.empty[ActorRef[Command], Long];
 
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
@@ -82,36 +88,34 @@ class CRDTActor(
               DeltaMsg(ctx.self, delta)
         }
     
-  private def read(k: Long): (State, mutable.Map[Int, Long]) = {
+  private def read(k: Long) = {
+    ctx.log.info(s"CRDTActor-$id wants to read with k = $k")
+
     others.foreach {
-      (_, actorRef) =>
-        actorRef ! Read(ctx.self, k);
-    }
-
-
-    /*
-    def handleResponses(ackCount: Int, nackCount: Int, resultMap: mutable.Map[Int, Long]): Unit = {
-
-      if (ackCount >= (others.size + 1) / 2) {
-        if (nackCount >= 1) {
-
-        }
-      } else if (nackCount >= (others.size + 1) / 2) {
-
-      } else {
-
+      (_, actorRef) => {
+        actorRef ! Read(ctx.self, k)
       }
     }
-    handleResponses(0, 0, mutable.Map.empty)*/
+  }
+
+  private def requestWrite(k: Long, v: mutable.Map[Int, Long]) = {
+    ctx.log.info(s"CRDTActor-$id wants to write $v")
+    val key = Utils.randomString()
+    val value = Utils.randomInt()
+
+    ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+    crdtstate = crdtstate.put(selfNode, key, value)
+    ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+    broadcastAndResetDeltas()
+
+    ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+  }
 
     // Wait until received Ackread or Nackread from (n + 1) / 2 processes
 
     // if received at least 1 NackRead(k) return (State.Abort, mutable.Map.empty[Int, Long])
     // else select AckRead(k, kPrim, v) with highest kPrim and return (State.Commit, v)
-    (Abort, mutable.Map.empty)
-  }
 
-        
   
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
@@ -124,13 +128,14 @@ class CRDTActor(
     }
 
     case ConsumeOperation => {
-      val key = Utils.randomString()
-      val value = Utils.randomInt()
-      ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-      crdtstate = crdtstate.put(selfNode, key, value)
-      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-      broadcastAndResetDeltas()
-      ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+      //val key = Utils.randomString()
+      //val value = Utils.randomInt()
+      //ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+      //crdtstate = crdtstate.put(selfNode, key, value)
+      //ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+      //broadcastAndResetDeltas()
+      read(System.currentTimeMillis())
+      //ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
       Behaviors.same
     }
 
@@ -138,6 +143,7 @@ class CRDTActor(
       ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
+      ackReadResponses.clear()
       Behaviors.same
     }
 
@@ -146,7 +152,7 @@ class CRDTActor(
       if (write >= k || read >= k) {
         from ! NackRead(ctx.self, k);
       }
-      else{
+      else {
         read = k;
         from ! AckRead(ctx.self, k, write, vi);
       }
@@ -166,20 +172,34 @@ class CRDTActor(
       Behaviors.same
     }
 
+
     case AckRead(from, k, kPrim, v) => {
+      ctx.log.info(s"CRDTActor-$id: Received ACKREAD from id ${from.path.name}")
       ackReadResponses(kPrim) = v;
+      ctx.log.info(s"CRDTActor-$id: ACKREADS: ${ackReadResponses}")
+      if (ackReadResponses.size >= (others.size + 1) / 2 && !(nackReadResponses.size == 0)) {
+        val highestKprim = ackReadResponses.maxBy(_._1)
+        ctx.log.info(s"highest: $highestKprim")
+        //requestWrite()
+      }
       Behaviors.same
     }
     case NackRead(from, k) => {
-      nackReadResponses.appended(k);
+      ctx.log.info(s"CRDTActor-$id: Received NACKREAD from id ${from.path.name}")
+      nackReadResponses(from) = k;
+      ctx.log.info(s"CRDTActor-$id: NACKREADs: ${nackReadResponses}")
       Behaviors.same
     }
     case AckWrite(from, k) => {
-      ackWriteResponses.appended(k);
+      ctx.log.info(s"CRDTActor-$id: Received ACKWRITE from id ${from.path.name}")
+      ackWriteResponses(from) = k;
+      ctx.log.info(s"CRDTActor-$id: ACKWRITEs: ${ackWriteResponses}")
       Behaviors.same
     }
     case NackWrite(from, k) => {
-      nackWriteResponses.appended(k)
+      ctx.log.info(s"CRDTActor-$id: Received NACKWRITE from id ${from.path.name}")
+      nackWriteResponses(from) = k;
+      ctx.log.info(s"CRDTActor-$id: NACKWRITEs: ${nackWriteResponses}")
       Behaviors.same
     }
 
