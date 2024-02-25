@@ -10,6 +10,7 @@ import org.apache.pekko.cluster.ddata.ReplicatedData
 import org.apache.pekko.cluster.ddata.ReplicatedDelta
 import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
+import java.time.Clock
 
 object CRDTActor {
   // The type of messages that the actor can handle
@@ -66,6 +67,7 @@ class CRDTActor(
 
 
   // Note: you probably want to modify this method to be more efficient
+  //TODO: atm it broadcasts the whole crdt, make it more efficient by only broadcasting what should be added!!
   private def broadcastAndResetDeltas(): Unit =
     val deltaOption = crdtstate.delta
     deltaOption match
@@ -74,8 +76,10 @@ class CRDTActor(
         crdtstate = crdtstate.resetDelta // May be omitted
         others.foreach { //
           (name, actorRef) =>
-            actorRef !
-              DeltaMsg(ctx.self, delta)
+            if (actorRef != ctx.self) {
+              actorRef !
+                DeltaMsg(ctx.self, delta)
+            }
         }
 
   private def readFunc(k: Int): Unit = {
@@ -84,9 +88,9 @@ class CRDTActor(
     highestK = 0
     others.foreach {
           (name, actorRef) =>
-          if (actorRef != ctx.self) {
-            actorRef ! Read(k, ctx.self)
-          }
+            if (actorRef != ctx.self) {
+              actorRef ! Read(k, ctx.self)
+            }
         }
   }
 
@@ -95,48 +99,42 @@ class CRDTActor(
     nackVotes = 0
     others.foreach {
           (name, actorRef) =>
-          if (actorRef != ctx.self) {
-            actorRef ! Write(k, v, ctx.self)
-          }
+            if (actorRef != ctx.self) {
+              actorRef ! Write(k, v, ctx.self)
+            }
         }
   }
 
   //This is my getLease function
   private def commit(v: (Int, Long)): Unit = {
-    ctx.log.info(s"CRDTActor-$id: Inside the commit func")
+    ctx.log.info(s"CRDTActor-$id: Inside the commit func with v: " + v)
     if (v != null) {
-      if (v._2 < System.currentTimeMillis() && (v._2 + 500) > System.currentTimeMillis()) {
-        ki = ki + 1
+      if (v._2 < Clock.systemDefaultZone().millis() && (v._2 + 500) > Clock.systemDefaultZone().millis()) {
+        ctx.log.info(s"CRDTActor-$id: NEver comes here?")
+        //ki = read + 1
         Thread.sleep(500)
         ctx.self ! ConsumeOperation // start consuming operations
         Behaviors.same
       }
     }
     if (v == null) { //Add check for time now later
-      writeFunc(ki, (ki,System.currentTimeMillis() + 1000))
-    } else if (v._2 < System.currentTimeMillis()) {
-      println("v._2: " + v._2)
-      println("v._1: " + v._1)
-      println("v: " + v)
-      writeFunc(ki, (ki,System.currentTimeMillis() + 1000))
-    } else if (v._1 == ki) {
-      writeFunc(ki, (ki,System.currentTimeMillis() + 1000))
+      ctx.log.info(s"CRDTActor-$id: Not null right")
+      writeFunc(ki, (id,Clock.systemDefaultZone().millis() + 1000))
+    } else if (v._2 < Clock.systemDefaultZone().millis()) {
+      ctx.log.info(s"CRDTActor-$id: Do i have the time?")
+      writeFunc(ki, (id,Clock.systemDefaultZone().millis() + 1000))
+    } else if (v._1 == id) {
+      ctx.log.info(s"CRDTActor-$id: renew")
+      writeFunc(ki, (id,Clock.systemDefaultZone().millis() + 1000))
     }
-
-      // ctx.log.info(s"CRDTActor-$id: acks: $ackVotes - nacks: $nackVotes")
-      // val key = Utils.randomString()
-      // val value = Utils.randomInt()
-      // ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-      // crdtstate = crdtstate.put(selfNode, key, value)
-      // ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-      // broadcastAndResetDeltas()
-      //ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+    ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
     Behaviors.same
   }
 
   private def writeCommit(): Unit = {
     //SYNC then do this
     //ctx.log.info(s"CRDTActor-$id: acks: $ackVotes - nacks: $nackVotes")
+    ctx.log.info(s"CRDTActor-$id: Got to commit and ki: " + ki)
     val key = Utils.randomString()
     val value = Utils.randomInt()
     ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
@@ -158,6 +156,7 @@ class CRDTActor(
       Behaviors.same
 
     case ConsumeOperation =>
+      //ctx.log.info(s"CRDTActor-$id trying to get lease with ki: " + ki)
       readFunc(ki)
       Behaviors.same
     
@@ -166,10 +165,11 @@ class CRDTActor(
       //ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
-      ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+      ctx.log.info(s"CRDTActor-$id: Merged CRDT state: $crdtstate")
       Behaviors.same
     
     case Read(k, sender) =>
+      //ctx.log.info(s"CRDTActor-$id: got a read request with: " + k + " but the highest write: " + write + " and read: " + read)
       // println("This is our k value in Read event: " + k)
       // println("And our write: " + write + ", and read: " + read)
       if(write >= k || read >= k) {
@@ -194,8 +194,11 @@ class CRDTActor(
 
     case NackRead(k) => 
       nackVotes = nackVotes + 1
-      if (nackVotes > (others.size/2)) {
+      if (nackVotes >= ((others.size+1)/2)) {
+        ki = read + 1
         //abort
+        //Alt ki + 1
+        //ctx.log.info(s"CRDTActor-$id:got denied with ki of: " + ki)
         ctx.self ! ConsumeOperation // start consuming operations
         Behaviors.same
       }
@@ -203,16 +206,17 @@ class CRDTActor(
     
 
     case AckRead(k, writej, v) => 
+      //ctx.log.info(s"CRDTActor-$id:got an ackread with ki of: " + ki)
       ackVotes = ackVotes + 1
       if (writej > highestK) {
         highestK = writej
         tempV = v
       }
-      if (ackVotes > (others.size/2) && nackVotes == 0) {
+      if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
         commit(tempV)
         // ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
         // Behaviors.same
-      } else if(ackVotes > (others.size/2) && nackVotes > 0) {
+      } else if(ackVotes >= (((others.size+1)/2)) && nackVotes > 0) {
         ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
         Behaviors.same
       }
@@ -221,8 +225,9 @@ class CRDTActor(
 
     case NackWrite(k) => 
       nackVotes = nackVotes + 1
-      if (nackVotes > (others.size/2)) {
+      if (nackVotes >= (((others.size+1)/2))) {
         //abort
+        //ki = write + 1
         ctx.self ! ConsumeOperation // start consuming operations
         Behaviors.same
       }
@@ -230,11 +235,11 @@ class CRDTActor(
 
     case AckWrite(k) => 
       ackVotes = ackVotes + 1
-      if (ackVotes > (others.size/2) && nackVotes == 0) {
+      if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
         //WRITE IS DONE LETSS GO
         //CALL ON LETS GO FUNCTION
         writeCommit()
-      } else if(ackVotes > (others.size/2) && nackVotes > 0) {
+      } else if(ackVotes >= (((others.size+1)/2)) && nackVotes > 0) {
         //Restart
         ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
         Behaviors.same

@@ -36,7 +36,7 @@ object Bootstrap {
     actors.foreach((_, actorRef) => actorRef ! CRDTActor.Start)
 
     // Sleep for a few seconds, then quit :)
-    Thread.sleep(5000)
+    Thread.sleep(2500)
 
     // Force quit
     System.exit(0)
