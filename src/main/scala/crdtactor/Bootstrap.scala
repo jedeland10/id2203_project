@@ -9,7 +9,19 @@ import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.util.Timeout
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 
+//import akka.pattern.ask //TESTING
+// import akka.util.Timeout
+// import scala.concurrent.duration._
+//import java.io._ //TESTING
+
 object Bootstrap {
+  //implicit val timeout: Timeout = 5.seconds //TESTING
+
+  // def writeToFile(filename: String, id: Int, state: ddata.LWWMap[String, Int]): Unit = {
+  //   val writer = new PrintWriter(new FileOutputStream(new File("./" + filename), true))
+  //   writer.write(s"CRDTActor-$id: CRDT state: $state\n")
+  //   writer.close()
+  // }
 
   // Startup the actors and execute the workload
   def apply(): Unit =
@@ -36,7 +48,15 @@ object Bootstrap {
     actors.foreach((_, actorRef) => actorRef ! CRDTActor.Start)
 
     // Sleep for a few seconds, then quit :)
-    Thread.sleep(5000)
+    Thread.sleep(2500)
+
+    // actors.foreach { case (id, actorRef) =>
+    //   val futureState = (actorRef ? CRDTActor.GetState).mapTo[ddata.LWWMap[String, Int]]
+    //   futureState.onComplete {
+    //   case Success(state) => writeToFile("CRDTStates.txt", id, state)
+    //   case Failure(e) => println(s"Error getting state from CRDTActor-$id: $e")
+    //   }
+    // }
 
     // Force quit
     System.exit(0)

@@ -12,4 +12,5 @@ lazy val root = project
     libraryDependencies += "org.apache.pekko" %% "pekko-cluster-typed" % pekkoVersion,
     libraryDependencies += "com.novocode" % "junit-interface" % junitInterfaceVersion % "test",
     libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackversion,
+    libraryDependencies += "org.scalameta" %% "munit" % "1.0.0-M7" % Test,
   )

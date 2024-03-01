@@ -12,7 +12,7 @@ import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
 import java.time.Clock
 
-object CRDTActor {
+object CRDTActorV2 {
   // The type of messages that the actor can handle
   sealed trait Command
 
@@ -38,12 +38,14 @@ object CRDTActor {
 
   case class NackWrite(k: Int) extends Command
 
+  case class Put(key: String, value: Int) extends Command
+
   //case object GetState extends Command //TESTING
 }
 
-import CRDTActor.*
+import CRDTActorV2.*
 
-class CRDTActor(
+class CRDTActorV2(
     id: Int,
     ctx: ActorContext[Command]
 ) extends AbstractBehavior[Command](ctx) {
@@ -167,9 +169,9 @@ class CRDTActor(
       Behaviors.same
 
     case ConsumeOperation =>
-      //ctx.log.info(s"CRDTActor-$id trying to get lease with ki: " + ki)
-      readFunc(ki)
-      Behaviors.same
+        Thread.sleep(500)
+        ctx.self ! ConsumeOperation
+        Behaviors.same
     
 
     case DeltaMsg(from, delta) =>
@@ -280,9 +282,12 @@ class CRDTActor(
       }
       Behaviors.same
     
-    // case GetState => //TESTING
-    //   ctx.reply(crdtstate)
-    //   Behaviors.same
+    case Put(key: String, value: Int) =>
+        ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+        crdtstate = crdtstate.put(selfNode, key, value)
+        ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+        broadcastAndResetDeltas()
+        Behaviors.same
 
   Behaviors.same
 }
