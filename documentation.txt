@@ -13,3 +13,8 @@ For push 16:22 (Sunday) (Git message: Removed renewal)
     and other times the write more than 10...
 
     Issue: The Ki goes up to 12499, which is neccesserarly not a problem but im to figure out if it would be a problem
+
+For push 20:26 (Friday) (Git message: Added tests)
+    1. I added tests for the CRDTs, they are not complete but they are a start. Transactions seems to be fully working.
+    2. Most importantly I did a new implementation of the locks, much easier one, but prone for deadlocks. Can probably be fairly easy solved
+        by adding a timeout for the locks. Furthermore I haven't added anything to do with Crash-Recorvery yet, that is to come.
