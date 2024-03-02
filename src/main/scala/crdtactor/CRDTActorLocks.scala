@@ -40,6 +40,8 @@ object CRDTActorLocks {
 
   case class responseMsg(msg: ddata.LWWMap[String, Int]) extends Command
 
+  case class AtomicPut(mapInput: Map[String, Int]) extends Command
+
   //case class LockReleased() //Release a lock to another actor
 
 }
@@ -61,6 +63,7 @@ class CRDTActorLocks(
   private var mapOfLocks = Map.empty[ActorRef[Command], Boolean] //Map of actors and their locks
   var keyToBe = "" //Key to be added to the CRDT
   var valueToBe = 0 //Value to be added to the CRDT
+  private var atomicMap = Map.empty[String, Int] //Array of key-value pairs to be added to the CRDT
 
   // Hack to get the actor references of the other actors, check out `lazy val`
   // Careful: make sure you know what you are doing if you are editing this code
@@ -94,7 +97,7 @@ class CRDTActorLocks(
       Behaviors.same
 
     case DeltaMsg(from, delta) =>
-      ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
+      //ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
       // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
       Behaviors.same
@@ -109,19 +112,23 @@ class CRDTActorLocks(
       Behaviors.same
 
     case Get(replyTo) =>
-      //println(crdtstate)
       replyTo ! responseMsg(crdtstate) //Send the state to the requester
       Behaviors.same
 
     case AcquireLock(requester) => //Send lock to requester if you have it, otherwise enuqueu it
       //ctx.log.info(s"CRDTActor-$id: Someone wants my lock")
+//      println("Ctx.self: " + ctx.self)
+//      println("SelfNode: " + selfNode)
       if (requester != ctx.self) {
         if (hasLock) {
-          //ctx.log.info(s"CRDTActor-$id: Will try to send it")
+          ctx.log.info(s"CRDTActor-$id: Will try to send lock to $requester")
           requester ! LockAcquired(ctx.self) //Give the lock to the requester
+          hasLock = false
         } else {
           // Add requester to the queue, because someone else has the lock
+          //ctx.log.info(s"CRDTActor-$id: I don't have the lock, so I will enqueue it: $lockQueue")
           lockQueue = lockQueue.enqueue(requester)
+          ctx.log.info(s"CRDTActor-$id: I don't have the lock, so I will enqueue it: $lockQueue")
         }
       }
       Behaviors.same
@@ -131,10 +138,20 @@ class CRDTActorLocks(
       //Check that you have all the locks, if so, add to CRDT, broadcast and release the locks
       //ctx.log.info(s"CRDTActor-$id: I got a lock!")
       mapOfLocks = mapOfLocks + (sender -> true)
+      ctx.log.info(s"CRDTActor-$id: I got a lock from $sender and the size of the map is ${mapOfLocks.size} and the size of others is ${others.size-1}")
       if (mapOfLocks.size == others.size-1) {
-        crdtstate = crdtstate.put(selfNode, keyToBe, valueToBe)
+        ctx.log.info(s"CRDTActor-$id: I have all the locks!")
+        if (atomicMap.nonEmpty) {
+          //Foreach value and key in the atomicArray, add it to the CRDT
+          ctx.log.info(s"CRDTActor-$id: I will add the atomicMap to the CRDT")
+          atomicMap.foreach { (key, value) =>
+            crdtstate = crdtstate.put(selfNode, key, value)
+          }
+          atomicMap = Map.empty[String, Int]
+        } else {
+          crdtstate = crdtstate.put(selfNode, keyToBe, valueToBe)
+        }
         broadcastAndResetDeltas()
-        Thread.sleep(500)
         mapOfLocks.foreach { (actorRef, _) =>
           actorRef ! LockReleased
         }
@@ -147,6 +164,7 @@ class CRDTActorLocks(
 
     case LockReleased => //release a lock to another actor
       //Check if there are more actors in the queue, if so, send the lock to the next actor
+      ctx.log.info(s"CRDTActor-$id: I got my lock back!")
       hasLock = true
       if (lockQueue.nonEmpty) {
         //if im the first one in the queue, ask for the locks of the others
@@ -161,6 +179,15 @@ class CRDTActorLocks(
         } else {
           //do nothing
         }*/
+      }
+      Behaviors.same
+
+    //Should take a an array of keys and values
+    case AtomicPut(mapInput) =>
+      //foreach pair of keys and values inside the parameter array, add the key and value to the CRDT
+      atomicMap = mapInput
+      others.foreach { (_, actorRef) =>
+        actorRef ! AcquireLock(ctx.self)
       }
       Behaviors.same
 
