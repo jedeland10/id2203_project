@@ -6,9 +6,15 @@ Algorithms to use:
 
 Plan for fail-recovery:
     - Implement a simple version of the fail-recovery model
-    - Create a agent only used as a fail-recovery agent (is it still disitrubted, not really, what happens if tha agent fails...)
+    - Create a agent only used as a fail-recovery agent (is it still distributed, not really, what happens if tha agent fails...)
         Maintain a heartbeat mechanism: Each agent periodically sends heartbeats to the failure detector actor.
         Monitor heartbeat timeouts: The failure detector actor monitors the time since the last heartbeat from each agent.
         Declare failure: If an agent doesn't send a heartbeat within a timeout threshold, the failure detector marks it as failed and notifies other agents.
 
-
+TODO:
+    [] Implement fail-recovery
+        - Use heartbeats to detect if an agent has failed
+    [] Check that the locking mechanism works by implementing a queue to handle the requests when the lock is already acquired
+    [] Make sure deadlocks can't happen by implementing a timeout for the lock
+    [] Instead of creating random characters for the keys on execution, create a file with a list of keys and values and read directly from there instead
+    [] Write a testcase to examine the difference when running the skeleton algorithm versus our new algorithm (e.g. run the execution non-stop for 5 seconds and record the CRDTs afterwards)
