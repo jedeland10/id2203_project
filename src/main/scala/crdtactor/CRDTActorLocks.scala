@@ -203,6 +203,7 @@ class CRDTActorLocks(
       mapOfLocks = mapOfLocks + (sender -> true)
       if (mapOfLocks.size == alive.size) {
         ctx.log.info(s"CRDTActor-$id: I have all the locks!")
+        ctx.log.info(s"CRDTActor-$id: writing: $opQueue")
         if (atomicMap.nonEmpty) {
           atomicMap.foreach { (key, value) =>
             crdtstate = crdtstate.put(selfNode, key, value)
@@ -217,26 +218,26 @@ class CRDTActorLocks(
               crdtstate = crdtstate.put(selfNode, key, value)
               ctx.log.info(s"CRDTActor-$id current state $crdtstate")
             case opInc(key) =>
-              val currentValue: Int = crdtstate.get(key).getOrElse(0)
-              ctx.log.info(s"CRDTActor-$id current val $currentValue")
-              val valueToAdd: Int = currentValue + 1
-              ctx.log.info(s"CRDTActor-$id value to add $valueToAdd")
-              crdtstate.put(selfNode, key, valueToAdd)
+              crdtstate = crdtstate.put(selfNode, key, crdtstate.get(key).getOrElse(0) + 1)
               ctx.log.info(s"CRDTActor-$id current state $crdtstate")
           }
         }
-        ctx.log.info(s"CRDTActor-$id current state $crdtstate")
         broadcastAndResetDeltas()
         mapOfLocks.foreach { (actorRef, _) =>
           actorRef ! LockReleased
         }
         mapOfLocks = Map.empty[ActorRef[Command], Boolean]
-        hasLock = true
+      } else if (hasLock) {
+          alive.filter((actorRef, _) => !mapOfLocks.contains(actorRef)).foreach { (actorRef, _) =>
+            actorRef ! AcquireLock(ctx.self)
+          }
       }
       Behaviors.same
 
     case LockReleased =>
       hasLock = true
+      currentHolder = ctx.self
+      ctx.log.info(s"CRDTActor-$id: got my lock back")
       if (lockQueue.nonEmpty) {
         val actorRef = lockQueue.dequeue
         actorRef ! LockAcquired(actorRef)

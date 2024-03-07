@@ -253,7 +253,7 @@ class testClass extends munit.FunSuite:
 
 
     test("Integration test") {
-        val N: Int = 3
+        val N: Int = 8
         val system = ActorSystem("CRDTActor")
 
         val testKit = ActorTestKit()
@@ -277,8 +277,8 @@ class testClass extends munit.FunSuite:
             actors.foreach((_ , actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
         }
 
-        Thread.sleep(5000)
-        actors(2) ! CRDTActorLocks.Get(probe.ref)
+        Thread.sleep(20000)
+        actors(7) ! CRDTActorLocks.Get(probe.ref)
         val response = (0 until 1).map(_ => probe.receiveMessage())
         var resultX = 0
        // var resultY = 0
