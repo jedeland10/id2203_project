@@ -13,6 +13,10 @@ import scala.collection.mutable.Queue
 import scala.concurrent.ExecutionContext
 
 object CRDTActorLocks {
+
+  sealed trait Operation
+  case class opPut(key: String, value: Int) extends Operation
+  case class opInc(key: String) extends Operation
   // The type of messages that the actor can handle
   sealed trait Command
 
@@ -44,7 +48,7 @@ object CRDTActorLocks {
 
   case class AtomicIncrement(key: String) extends Command
 
-  case class Increment() extends Command
+  case class Increment(key: String) extends Command
 
   case class HeartBeat(from: ActorRef[Command]) extends Command
 
@@ -73,7 +77,7 @@ class CRDTActorLocks(
   var valueToBe = 0 //Value to be added to the CRDT
   private var atomicMap = Map.empty[String, Int] //Map of key-value pairs to be added to the CRDT
 
-  private val opQueue = mutable.Queue.empty[(String, Int)]
+  private val opQueue = mutable.Queue.empty[Operation]
 
   private var currentHolder = ctx.self
 
@@ -114,7 +118,6 @@ class CRDTActorLocks(
 
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
-    ctx.log.info(s"CRDTActor-$id: $crdtstate")
     val deltaOption = crdtstate.delta
     deltaOption match
       case None => ()
@@ -169,7 +172,7 @@ class CRDTActorLocks(
     case Put(key, value) => //Tries to add a value into the CRDT
       keyToBe = key
       valueToBe = value
-      opQueue.enqueue((key, value))
+      opQueue.enqueue(opPut(key, value))
       // Request locks from all other actors
       alive.foreach { (actorRef, _) =>
         actorRef ! AcquireLock(ctx.self)
@@ -208,11 +211,21 @@ class CRDTActorLocks(
         }
 
         while (opQueue.nonEmpty) {
-          val (key, value) = opQueue.dequeue
-          ctx.log.info(s"CRDTActor-$id writing values from queue $key $value")
-          crdtstate = crdtstate.put(selfNode, key, value)
+          val op = opQueue.dequeue
+          op match {
+            case opPut(key, value) =>
+              crdtstate = crdtstate.put(selfNode, key, value)
+              ctx.log.info(s"CRDTActor-$id current state $crdtstate")
+            case opInc(key) =>
+              val currentValue: Int = crdtstate.get(key).getOrElse(0)
+              ctx.log.info(s"CRDTActor-$id current val $currentValue")
+              val valueToAdd: Int = currentValue + 1
+              ctx.log.info(s"CRDTActor-$id value to add $valueToAdd")
+              crdtstate.put(selfNode, key, valueToAdd)
+              ctx.log.info(s"CRDTActor-$id current state $crdtstate")
+          }
         }
-
+        ctx.log.info(s"CRDTActor-$id current state $crdtstate")
         broadcastAndResetDeltas()
         mapOfLocks.foreach { (actorRef, _) =>
           actorRef ! LockReleased
@@ -227,6 +240,7 @@ class CRDTActorLocks(
       if (lockQueue.nonEmpty) {
         val actorRef = lockQueue.dequeue
         actorRef ! LockAcquired(actorRef)
+        currentHolder = actorRef
       }
       Behaviors.same
 
@@ -238,9 +252,11 @@ class CRDTActorLocks(
       }
       Behaviors.same
 
-    case Increment() =>
-      val currentValue = crdtstate.get(id.toString).getOrElse(0)
-      crdtstate.put(selfNode, id.toString, crdtstate.get(id.toString).getOrElse(0) + 1)
+    case Increment(key) =>
+      opQueue.enqueue(opInc(key))
+      alive.foreach { (actorRef, _) =>
+        actorRef ! AcquireLock(ctx.self)
+      }
       Behaviors.same
 
   Behaviors.same

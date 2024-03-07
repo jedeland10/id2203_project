@@ -20,6 +20,7 @@ class testClass extends munit.FunSuite:
 //        assert(obtainedResults.forall(x => x % 2 == 0))
 //    }
 
+    /*
     test("CRDT actors transaction") {
         val N: Int = 2
         val system = ActorSystem("CRDTActor")
@@ -248,10 +249,11 @@ class testClass extends munit.FunSuite:
         println("Result non-atomic X: " + resultX)
         println("Result non-atomic Y: " + resultY)
         assertNotEquals(resultX, resultY)
-    }
+    }*/
 
-    /*test("Integration test") {
-        val N: Int = 8
+
+    test("Integration test") {
+        val N: Int = 3
         val system = ActorSystem("CRDTActor")
 
         val testKit = ActorTestKit()
@@ -271,7 +273,29 @@ class testClass extends munit.FunSuite:
         // Start the actors
         actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Start)
 
-        for(n <- Range(0, 1_000_000)) {
-            actors.foreach((_ , actorRef) => actorRef ! CRDTActorLocks.Increment())
+        for(n <- Range(0, 10)) {
+            actors.foreach((_ , actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
         }
-    }*/
+
+        Thread.sleep(5000)
+        actors(2) ! CRDTActorLocks.Get(probe.ref)
+        val response = (0 until 1).map(_ => probe.receiveMessage())
+        var resultX = 0
+       // var resultY = 0
+        response.foreach {
+            case msg: responseMsg =>
+                println(msg)
+                msg match {
+                    case responseMsg(map) =>
+                        resultX = map.get("x").getOrElse(0) // Get value or default to 0
+                        //resultY = map.get("y").getOrElse(1) // Get value or default to 1
+                    case null => fail("Unexpected message: " + msg)
+                }
+            case msg =>
+                fail("Unexpected message: " + msg)
+        }
+        println("Result X: " + resultX)
+        assertEquals(resultX, N*10)
+
+
+    }

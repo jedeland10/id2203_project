@@ -23,5 +23,6 @@ TODO UPDATED:
     [] Fail recovery, broadcast delta message when receiving a heartbeat from "dead" actor.
     [] Fix the queue for operations to be executed once we have the lock.
     [] Integration test, start 8 actors, each actor increments a counter 1.000.000 times.
+        - By Having a key-value store with only one key: X, and they all increment X 1.000.000 times.
     [] Latency test, 3 cases, see email from Jonas.
     [] Throughput, linked to integration test.
