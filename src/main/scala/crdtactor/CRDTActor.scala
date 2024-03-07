@@ -5,12 +5,12 @@ import org.apache.pekko.actor.typed.scaladsl.AbstractBehavior
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.typed.Behavior
 import org.apache.pekko.cluster.ddata
-import org.apache.pekko.cluster.ddata.DeltaReplicatedData
-import org.apache.pekko.cluster.ddata.ReplicatedData
 import org.apache.pekko.cluster.ddata.ReplicatedDelta
-import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
-import java.time.Clock
+import org.apache.pekko.actor.Cancellable
+
+import scala.concurrent.ExecutionContext
+
 
 object CRDTActor {
  // The type of messages that the actor can handle
@@ -37,6 +37,9 @@ object CRDTActor {
  case class AckWrite(k: Int) extends Command
 
  case class NackWrite(k: Int) extends Command
+  case class HeartBeat(from: ActorRef[Command]) extends Command
+
+  case class Sleep(time: Long) extends Command
 
  //case object GetState extends Command //TESTING
 }
@@ -70,6 +73,33 @@ class CRDTActor(
  private var waitingForR: Boolean = false
  private var waitingForW: Boolean = false
 
+ private val executionContext: ExecutionContext = ctx.system.executionContext
+
+ private val hearBeatTimeOut = java.time.Duration.ofMillis(400)
+
+ private var alive = Map.empty[ActorRef[Command], Long]
+  private def startHeartbeatScheduler(): Unit = {
+    ctx.system.scheduler.scheduleWithFixedDelay(
+      java.time.Duration.ofMillis(200),
+      java.time.Duration.ofMillis(200),
+      () => alive.foreach((actorRef,_) => actorRef ! HeartBeat(ctx.self)),
+      executionContext)
+  }
+  private def startTimeoutScheduler(): Unit = {
+    ctx.system.scheduler.scheduleWithFixedDelay(
+      java.time.Duration.ofMillis(500),
+      java.time.Duration.ofMillis(500),
+      () => {
+        alive.foreach {
+          case (actorRef, expectedResponseTime) =>
+            if (expectedResponseTime < java.time.Instant.now().toEpochMilli) {
+              //ctx.log.info(s"CRDTActor-$id: Actor timed out")
+              alive = alive.removed(actorRef)
+            }
+        }
+      },
+      executionContext)
+  }
 
  // Note: you probably want to modify this method to be more efficient
  //TODO: atm it broadcasts the whole crdt, make it more efficient by only broadcasting what should be added!!
@@ -79,8 +109,8 @@ class CRDTActor(
      case None => ()
      case Some(delta) =>
        crdtstate = crdtstate.resetDelta // May be omitted
-       others.foreach { //
-         (name, actorRef) =>
+       alive.foreach { //
+         (actorRef, _) =>
            if (actorRef != ctx.self) {
              actorRef !
                DeltaMsg(ctx.self, delta)
@@ -92,8 +122,8 @@ class CRDTActor(
    nackVotes = 0
    highestK = 0
    waitingForR = true
-   others.foreach {
-         (name, actorRef) =>
+   alive.foreach {
+         (actorRef, _) =>
            if (actorRef != ctx.self) {
              actorRef ! Read(k, ctx.self)
            }
@@ -104,8 +134,8 @@ class CRDTActor(
    ackVotes = 0
    nackVotes = 0
    waitingForW = true
-   others.foreach {
-         (name, actorRef) =>
+   alive.foreach {
+         (actorRef, _) =>
            if (actorRef != ctx.self) {
              actorRef ! Write(k, v, ctx.self)
            }
@@ -116,7 +146,7 @@ class CRDTActor(
  private def commit(v: (Int, Long)): Unit = {
    //ctx.log.info(s"CRDTActor-$id: Inside the commit func with v: " + v)
    if (v != null) {
-     if (v._2 < java.time.Instant.now().toEpochMilli() && (v._2 + 50) > java.time.Instant.now().toEpochMilli()) {
+     if (v._2 < java.time.Instant.now().toEpochMilli && (v._2 + 50) > java.time.Instant.now().toEpochMilli) {
        ctx.log.info(s"CRDTActor-$id: Never comes here?")
        //ki = read + 1
        Thread.sleep(50)
@@ -126,11 +156,11 @@ class CRDTActor(
    }
    if (v == (0,0)) { //Add check for time now later
      ctx.log.info(s"CRDTActor-$id: Not null right")
-     writeFunc(ki, (id,java.time.Instant.now().toEpochMilli() + 100))
-   } else if (v._2 < java.time.Instant.now().toEpochMilli()) {
+     writeFunc(ki, (id,java.time.Instant.now().toEpochMilli + 100))
+   } else if (v._2 < java.time.Instant.now().toEpochMilli) {
      ctx.log.info(s"CRDTActor-$id: v._2: " + v._2)
-     ctx.log.info(s"CRDTActor-$id: current time: " + java.time.Instant.now().toEpochMilli())
-     writeFunc(ki, (id,java.time.Instant.now().toEpochMilli() + 100))
+     ctx.log.info(s"CRDTActor-$id: current time: " + java.time.Instant.now().toEpochMilli)
+     writeFunc(ki, (id,java.time.Instant.now().toEpochMilli + 100))
    } 
    //else if (v._1 == id) {
    //   ctx.log.info(s"CRDTActor-$id: renew")
@@ -156,20 +186,36 @@ class CRDTActor(
    Behaviors.same
  }
 
-
  // This is the event handler of the actor, implement its logic here
  // Note: the current implementation is rather inefficient, you can probably
  // do better by not sending as many delta update messages
  override def onMessage(msg: Command): Behavior[Command] = msg match
    case Start =>
      ctx.log.info(s"CRDTActor-$id started")
-     ctx.self ! ConsumeOperation // start consuming operations
+     others.filter((_,ref) => ref != ctx.self).foreach((_, actorRef) =>
+       alive = alive.updated(actorRef, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis))
+     startHeartbeatScheduler()
+     startTimeoutScheduler()
+     // ctx.self ! ConsumeOperation // start consuming operations
      Behaviors.same
 
    case ConsumeOperation =>
      //ctx.log.info(s"CRDTActor-$id trying to get lease with ki: " + ki)
      readFunc(ki)
      Behaviors.same
+
+   case HeartBeat(from) =>
+     ctx.log.info(s"CRDTActor-$id: got a heartbeat from: " + from)
+     if (!alive.contains(from)) {
+       ctx.log.info(s"CRDTActor-$id: rejoined, alive: " + alive)
+       ctx.log.info(s"CRDTActor-$id: rejoined, ref: " + from)
+     }
+     alive = alive.updated(from, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis)
+     Behaviors.same
+
+   case Sleep(time) =>
+      Thread.sleep(time)
+      Behaviors.same
    
 
    case DeltaMsg(from, delta) =>
@@ -209,7 +255,7 @@ class CRDTActor(
    case NackRead(k) => 
      if (waitingForR) {
        nackVotes = nackVotes + 1
-       if (nackVotes >= ((others.size+1)/2)) {
+       if (nackVotes >= ((alive.size+1)/2)) {
          ki = read + 1
          // nackVotes = 0
          // ackVotes = 0
@@ -232,14 +278,14 @@ class CRDTActor(
          highestK = writej
          tempV = v
        }
-       if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
+       if (ackVotes >= ((alive.size+1)/2) && nackVotes == 0) {
          // ackVotes = 0
          // nackVotes = 0
          waitingForR = false
          commit(tempV)
          // ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
          // Behaviors.same
-       } else if(ackVotes >= (((others.size+1)/2)) && nackVotes > 0) {
+       } else if(ackVotes >= ((alive.size+1)/2) && nackVotes > 0) {
          waitingForR = false
          ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
          Behaviors.same
@@ -251,7 +297,7 @@ class CRDTActor(
    case NackWrite(k) => 
      if (waitingForW) {
        nackVotes = nackVotes + 1
-       if (nackVotes >= (((others.size+1)/2))) {
+       if (nackVotes >= ((alive.size+1)/2)) {
          // nackVotes = 0
          // ackVotes = 0
          //abort
@@ -266,12 +312,12 @@ class CRDTActor(
    case AckWrite(k) => 
      if (waitingForW) {
        ackVotes = ackVotes + 1
-       if (ackVotes >= (((others.size+1)/2)) && nackVotes == 0) {
+       if (ackVotes >= ((alive.size+1)/2) && nackVotes == 0) {
          // ackVotes = 0
          // nackVotes = 0
          waitingForR = false
          writeCommit()
-       } else if(ackVotes >=(((others.size+1)/2)) && nackVotes > 0) {
+       } else if(ackVotes >= ((alive.size+1)/2) && nackVotes > 0) {
          //Restart
          waitingForR = false
          ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
@@ -279,10 +325,6 @@ class CRDTActor(
        }
      }
      Behaviors.same
-   
-   // case GetState => //TESTING
-   //   ctx.reply(crdtstate)
-   //   Behaviors.same
 
  Behaviors.same
 }

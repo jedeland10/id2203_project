@@ -18,3 +18,10 @@ TODO:
     [] Make sure deadlocks can't happen by implementing a timeout for the lock
     [] Instead of creating random characters for the keys on execution, create a file with a list of keys and values and read directly from there instead
     [] Write a testcase to examine the difference when running the skeleton algorithm versus our new algorithm (e.g. run the execution non-stop for 5 seconds and record the CRDTs afterwards)
+
+TODO UPDATED:
+    [] Fail recovery, broadcast delta message when receiving a heartbeat from "dead" actor.
+    [] Fix the queue for operations to be executed once we have the lock.
+    [] Integration test, start 8 actors, each actor increments a counter 1.000.000 times.
+    [] Latency test, 3 cases, see email from Jonas.
+    [] Throughput, linked to integration test.

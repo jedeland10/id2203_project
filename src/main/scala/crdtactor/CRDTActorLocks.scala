@@ -5,12 +5,12 @@ import org.apache.pekko.actor.typed.scaladsl.AbstractBehavior
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.typed.Behavior
 import org.apache.pekko.cluster.ddata
-import org.apache.pekko.cluster.ddata.DeltaReplicatedData
-import org.apache.pekko.cluster.ddata.ReplicatedData
 import org.apache.pekko.cluster.ddata.ReplicatedDelta
-import org.apache.pekko.cluster.ddata.SelfUniqueAddress
 import org.apache.pekko.actor.typed.ActorRef
+
+import scala.collection.mutable
 import scala.collection.mutable.Queue
+import scala.concurrent.ExecutionContext
 
 object CRDTActorLocks {
   // The type of messages that the actor can handle
@@ -42,6 +42,14 @@ object CRDTActorLocks {
 
   case class AtomicPut(mapInput: Map[String, Int]) extends Command
 
+  case class AtomicIncrement(key: String) extends Command
+
+  case class Increment() extends Command
+
+  case class HeartBeat(from: ActorRef[Command]) extends Command
+
+  case class Sleep(time: Long) extends Command
+
   //case class LockReleased() //Release a lock to another actor
 
 }
@@ -59,29 +67,73 @@ class CRDTActorLocks(
   private val selfNode = Utils.nodeFactory()
 
   private var hasLock = true //If the actor has its own lock
-  private var lockQueue = Queue.empty[ActorRef[Command]] //Queue of actors waiting for the lock
+  private var lockQueue = mutable.Queue.empty[ActorRef[Command]] //Queue of actors waiting for the lock
   private var mapOfLocks = Map.empty[ActorRef[Command], Boolean] //Map of actors and their locks
   var keyToBe = "" //Key to be added to the CRDT
   var valueToBe = 0 //Value to be added to the CRDT
-  private var atomicMap = Map.empty[String, Int] //Array of key-value pairs to be added to the CRDT
+  private var atomicMap = Map.empty[String, Int] //Map of key-value pairs to be added to the CRDT
+
+  private val opQueue = mutable.Queue.empty[(String, Int)]
+
+  private var currentHolder = ctx.self
 
   // Hack to get the actor references of the other actors, check out `lazy val`
   // Careful: make sure you know what you are doing if you are editing this code
   private lazy val others =
   Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
+  private val executionContext: ExecutionContext = ctx.system.executionContext
+
+  private val hearBeatTimeOut = java.time.Duration.ofMillis(400)
+
+  private var alive = Map.empty[ActorRef[Command], Long]
+
+  private def startHeartbeatScheduler(): Unit = {
+    ctx.system.scheduler.scheduleWithFixedDelay(
+      java.time.Duration.ofMillis(200),
+      java.time.Duration.ofMillis(200),
+      () => alive.foreach((actorRef, _) => actorRef ! HeartBeat(ctx.self)),
+      executionContext)
+  }
+
+  private def startTimeoutScheduler(): Unit = {
+    ctx.system.scheduler.scheduleWithFixedDelay(
+      java.time.Duration.ofMillis(500),
+      java.time.Duration.ofMillis(500),
+      () => {
+        alive.foreach {
+          case (actorRef, expectedResponseTime) =>
+            if (expectedResponseTime < java.time.Instant.now().toEpochMilli) {
+              //ctx.log.info(s"CRDTActor-$id: Actor timed out")
+              alive = alive.removed(actorRef)
+            }
+        }
+      },
+      executionContext)
+  }
+
   // Note: you probably want to modify this method to be more efficient
   private def broadcastAndResetDeltas(): Unit =
+    ctx.log.info(s"CRDTActor-$id: $crdtstate")
     val deltaOption = crdtstate.delta
     deltaOption match
       case None => ()
       case Some(delta) =>
         crdtstate = crdtstate.resetDelta // May be omitted
-        others.foreach { //
-          (name, actorRef) =>
+        alive.foreach { //
+          (actorRef, _) =>
             actorRef !
               DeltaMsg(ctx.self, delta)
         }
+
+  private def sendDelta(actorRef: ActorRef[Command]): Unit =
+    val deltaOption = crdtstate.delta
+    deltaOption match
+      case None => ()
+      case Some(delta) =>
+        crdtstate = crdtstate.resetDelta // May be omitted
+        actorRef ! DeltaMsg(ctx.self, delta)
+
 
   // This is the event handler of the actor, implement its logic here
   // Note: the current implementation is rather inefficient, you can probably
@@ -89,7 +141,10 @@ class CRDTActorLocks(
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case Start =>
       ctx.log.info(s"CRDTActor-$id started")
-      ctx.self ! ConsumeOperation // start consuming operations
+      others.filter((_, ref) => ref != ctx.self).foreach((_, actorRef) =>
+        alive = alive.updated(actorRef, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis))
+      startHeartbeatScheduler()
+      startTimeoutScheduler()
       Behaviors.same
 
     case ConsumeOperation =>
@@ -97,98 +152,95 @@ class CRDTActorLocks(
       Behaviors.same
 
     case DeltaMsg(from, delta) =>
-      //ctx.log.info(s"CRDTActor-$id: Received delta from ${from.path.name}")
-      // Merge the delta into the local CRDT state
       crdtstate = crdtstate.mergeDelta(delta.asInstanceOf) // do you trust me?
+      Behaviors.same
+
+    case HeartBeat(from) =>
+      if (!alive.contains(from)) {
+        sendDelta(from)
+      }
+      alive = alive.updated(from, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis)
+      Behaviors.same
+
+    case Sleep(time) =>
+      Thread.sleep(time)
       Behaviors.same
 
     case Put(key, value) => //Tries to add a value into the CRDT
       keyToBe = key
       valueToBe = value
+      opQueue.enqueue((key, value))
       // Request locks from all other actors
-      others.foreach { (_, actorRef) =>
+      alive.foreach { (actorRef, _) =>
         actorRef ! AcquireLock(ctx.self)
       }
       Behaviors.same
 
     case Get(replyTo) =>
       replyTo ! responseMsg(crdtstate) //Send the state to the requester
+      ctx.log.info(s"$crdtstate")
       Behaviors.same
 
-    case AcquireLock(requester) => //Send lock to requester if you have it, otherwise enuqueu it
-      //ctx.log.info(s"CRDTActor-$id: Someone wants my lock")
-//      println("Ctx.self: " + ctx.self)
-//      println("SelfNode: " + selfNode)
+    case AcquireLock(requester) =>
       if (requester != ctx.self) {
         if (hasLock) {
-          ctx.log.info(s"CRDTActor-$id: Will try to send lock to $requester")
+          ctx.log.info(s"CRDTActor-$id: gave $requester lock")
           requester ! LockAcquired(ctx.self) //Give the lock to the requester
+          currentHolder = requester
           hasLock = false
-        } else {
-          // Add requester to the queue, because someone else has the lock
-          //ctx.log.info(s"CRDTActor-$id: I don't have the lock, so I will enqueue it: $lockQueue")
-          lockQueue = lockQueue.enqueue(requester)
-          ctx.log.info(s"CRDTActor-$id: I don't have the lock, so I will enqueue it: $lockQueue")
+        } else if (!lockQueue.contains(requester) && currentHolder != requester) {
+          ctx.log.info(s"CRDTActor-$id: added $requester to lock queue")
+          lockQueue.enqueue(requester) //Add the requester to the queue
         }
       }
       Behaviors.same
 
-    case LockAcquired(sender) => //receive a lock from another actor
-      //save key and value to CRDT and Broadcast
-      //Check that you have all the locks, if so, add to CRDT, broadcast and release the locks
-      //ctx.log.info(s"CRDTActor-$id: I got a lock!")
+    case LockAcquired(sender) =>
+      ctx.log.info(s"CRDTActor-$id: got lock from $sender")
       mapOfLocks = mapOfLocks + (sender -> true)
-      ctx.log.info(s"CRDTActor-$id: I got a lock from $sender and the size of the map is ${mapOfLocks.size} and the size of others is ${others.size-1}")
-      if (mapOfLocks.size == others.size-1) {
+      if (mapOfLocks.size == alive.size) {
         ctx.log.info(s"CRDTActor-$id: I have all the locks!")
         if (atomicMap.nonEmpty) {
-          //Foreach value and key in the atomicArray, add it to the CRDT
-          ctx.log.info(s"CRDTActor-$id: I will add the atomicMap to the CRDT")
           atomicMap.foreach { (key, value) =>
             crdtstate = crdtstate.put(selfNode, key, value)
           }
           atomicMap = Map.empty[String, Int]
-        } else {
-          crdtstate = crdtstate.put(selfNode, keyToBe, valueToBe)
         }
+
+        while (opQueue.nonEmpty) {
+          val (key, value) = opQueue.dequeue
+          ctx.log.info(s"CRDTActor-$id writing values from queue $key $value")
+          crdtstate = crdtstate.put(selfNode, key, value)
+        }
+
         broadcastAndResetDeltas()
         mapOfLocks.foreach { (actorRef, _) =>
           actorRef ! LockReleased
         }
         mapOfLocks = Map.empty[ActorRef[Command], Boolean]
-        hasLock = true //Possibly redundant, but don't have time to check
-      } else {
-        //wait for more
+        hasLock = true
       }
       Behaviors.same
 
-    case LockReleased => //release a lock to another actor
-      //Check if there are more actors in the queue, if so, send the lock to the next actor
-      ctx.log.info(s"CRDTActor-$id: I got my lock back!")
+    case LockReleased =>
       hasLock = true
       if (lockQueue.nonEmpty) {
-        //if im the first one in the queue, ask for the locks of the others
         val actorRef = lockQueue.dequeue
         actorRef ! LockAcquired(actorRef)
-
-        //actorRef !
-        /*if (actorRef == ctx.self) {
-          others.foreach { (_, actorRef) =>
-            actorRef ! AcquireLock(ctx.self)
-          }
-        } else {
-          //do nothing
-        }*/
       }
       Behaviors.same
 
     //Should take a an array of keys and values
     case AtomicPut(mapInput) =>
-      //foreach pair of keys and values inside the parameter array, add the key and value to the CRDT
       atomicMap = mapInput
-      others.foreach { (_, actorRef) =>
+      alive.foreach { (actorRef, _) =>
         actorRef ! AcquireLock(ctx.self)
       }
+      Behaviors.same
+
+    case Increment() =>
+      val currentValue = crdtstate.get(id.toString).getOrElse(0)
+      crdtstate.put(selfNode, id.toString, crdtstate.get(id.toString).getOrElse(0) + 1)
       Behaviors.same
 
   Behaviors.same

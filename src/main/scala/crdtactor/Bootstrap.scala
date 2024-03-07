@@ -3,8 +3,7 @@ package crdtactor
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.Await
-
-import org.apache.pekko.actor.typed.scaladsl.adapter._
+import org.apache.pekko.actor.typed.scaladsl.adapter.*
 import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.util.Timeout
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
@@ -25,7 +24,7 @@ object Bootstrap {
 
   // Startup the actors and execute the workload
   def apply(): Unit =
-    val N_ACTORS = 9
+    val N_ACTORS = 3
 
     Utils.setLoggerLevel("DEBUG")
 
@@ -34,7 +33,7 @@ object Bootstrap {
     // Create the actors
     val actors = (0 until N_ACTORS).map { i =>
       val name = s"CRDTActor-$i"
-      val actorRef = system.spawn(
+      val actorRef = system.spawn (
         Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(i, ctx) },
         name
       )
@@ -47,16 +46,9 @@ object Bootstrap {
     // Start the actors
     actors.foreach((_, actorRef) => actorRef ! CRDTActor.Start)
 
+
     // Sleep for a few seconds, then quit :)
     Thread.sleep(2500)
-
-    // actors.foreach { case (id, actorRef) =>
-    //   val futureState = (actorRef ? CRDTActor.GetState).mapTo[ddata.LWWMap[String, Int]]
-    //   futureState.onComplete {
-    //   case Success(state) => writeToFile("CRDTStates.txt", id, state)
-    //   case Failure(e) => println(s"Error getting state from CRDTActor-$id: $e")
-    //   }
-    // }
 
     // Force quit
     System.exit(0)
