@@ -253,7 +253,8 @@ class testClass extends munit.FunSuite:
 
 
     test("Integration test") {
-        val N: Int = 8
+        val N: Int = 7
+        val nMessages = 1_000_000
         val system = ActorSystem("CRDTActor")
 
         val testKit = ActorTestKit()
@@ -273,12 +274,12 @@ class testClass extends munit.FunSuite:
         // Start the actors
         actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Start)
 
-        for(n <- Range(0, 10)) {
+        for(n <- Range(0, nMessages)) {
             actors.foreach((_ , actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
         }
 
-        Thread.sleep(20000)
-        actors(7) ! CRDTActorLocks.Get(probe.ref)
+        Thread.sleep(20_500)
+        actors(N - 1) ! CRDTActorLocks.Get(probe.ref)
         val response = (0 until 1).map(_ => probe.receiveMessage())
         var resultX = 0
        // var resultY = 0
@@ -295,7 +296,7 @@ class testClass extends munit.FunSuite:
                 fail("Unexpected message: " + msg)
         }
         println("Result X: " + resultX)
-        assertEquals(resultX, N*10)
+        assertEquals(resultX, N * nMessages)
 
 
     }

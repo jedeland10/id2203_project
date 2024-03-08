@@ -9,8 +9,9 @@ import org.apache.pekko.cluster.ddata.ReplicatedDelta
 import org.apache.pekko.actor.typed.ActorRef
 
 import scala.collection.mutable
-import scala.collection.mutable.Queue
+import scala.collection.mutable.{ListBuffer, Queue}
 import scala.concurrent.ExecutionContext
+import scala.util.Random
 
 object CRDTActorLocks {
 
@@ -21,8 +22,7 @@ object CRDTActorLocks {
   sealed trait Command
 
   // Messages containing the CRDT delta state exchanged between actors
-  case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta)
-    extends Command
+  case class DeltaMsg(from: ActorRef[Command], delta: ReplicatedDelta) extends Command
 
   // Triggers the actor to start the computation (do this only once!)
   case object Start extends Command
@@ -49,21 +49,36 @@ object CRDTActorLocks {
   case class AtomicIncrement(key: String) extends Command
 
   case class Increment(key: String) extends Command
+  case class NoLockInc(key: String) extends Command
 
   case class HeartBeat(from: ActorRef[Command]) extends Command
 
   case class Sleep(time: Long) extends Command
 
-  //case class LockReleased() //Release a lock to another actor
+  case object ReleaseLock extends Command
 
+  // Consensus messages
+  case class C_Decide(value: Any) extends Command
+  case class C_Propose(value: Any) extends Command;
+  case class Prepare(src: ActorRef[Command], proposalBallot: (Int, Int)) extends Command
+
+  case class Promise(src: ActorRef[Command], promiseBallot: (Int, Int), acceptedBallot: (Int, Int), acceptedValue: Option[Any]) extends Command
+
+  case class Accept(src: ActorRef[Command], acceptBallot: (Int, Int), proposedValue: Any) extends Command
+
+  case class Accepted(src: ActorRef[Command], acceptedBallot: (Int, Int)) extends Command
+
+  case class Nack(src: ActorRef[Command], ballot: (Int, Int)) extends Command
+
+  case class Decided(src: ActorRef[Command], decidedValue: Any) extends Command
 }
 
 import CRDTActorLocks.*
 
 class CRDTActorLocks(
-                      id: Int,
-                      ctx: ActorContext[Command]
-                    ) extends AbstractBehavior[Command](ctx) {
+    id: Int,
+    ctx: ActorContext[Command]
+  ) extends AbstractBehavior[Command](ctx) {
   // The CRDT state of this actor, mutable var as LWWMap is immutable
   private var crdtstate = ddata.LWWMap.empty[String, Int]
 
@@ -73,12 +88,11 @@ class CRDTActorLocks(
   private var hasLock = true //If the actor has its own lock
   private var lockQueue = mutable.Queue.empty[ActorRef[Command]] //Queue of actors waiting for the lock
   private var mapOfLocks = Map.empty[ActorRef[Command], Boolean] //Map of actors and their locks
-  var keyToBe = "" //Key to be added to the CRDT
-  var valueToBe = 0 //Value to be added to the CRDT
+  private var keyToBe = "" //Key to be added to the CRDT
+  private var valueToBe = 0 //Value to be added to the CRDT
   private var atomicMap = Map.empty[String, Int] //Map of key-value pairs to be added to the CRDT
 
   private val opQueue = mutable.Queue.empty[Operation]
-
   private var currentHolder = ctx.self
 
   // Hack to get the actor references of the other actors, check out `lazy val`
@@ -86,18 +100,27 @@ class CRDTActorLocks(
   private lazy val others =
   Utils.GLOBAL_STATE.getAll[Int, ActorRef[Command]]()
 
-  private val executionContext: ExecutionContext = ctx.system.executionContext
-
   private val hearBeatTimeOut = java.time.Duration.ofMillis(400)
-
   private var alive = Map.empty[ActorRef[Command], Long]
+
+  // Consensus variables
+  //Proposer State
+  private var round: Int = 0
+  private var proposedValue: Option[Any] = None
+  private var promises: ListBuffer[((Int, Int), Option[Any])] = ListBuffer.empty
+  private var numOfAccepts: Int = 0
+  private var decided: Boolean = false
+  //Acceptor State
+  private var promisedBallot: (Int, Int) = (0, 0)
+  private var acceptedBallot: (Int, Int) = (0, 0)
+  private var acceptedValue: Option[Any] = None
 
   private def startHeartbeatScheduler(): Unit = {
     ctx.system.scheduler.scheduleWithFixedDelay(
       java.time.Duration.ofMillis(200),
       java.time.Duration.ofMillis(200),
       () => alive.foreach((actorRef, _) => actorRef ! HeartBeat(ctx.self)),
-      executionContext)
+      ctx.system.executionContext)
   }
 
   private def startTimeoutScheduler(): Unit = {
@@ -113,7 +136,7 @@ class CRDTActorLocks(
             }
         }
       },
-      executionContext)
+      ctx.system.executionContext)
   }
 
   // Note: you probably want to modify this method to be more efficient
@@ -136,6 +159,46 @@ class CRDTActorLocks(
       case Some(delta) =>
         crdtstate = crdtstate.resetDelta // May be omitted
         actorRef ! DeltaMsg(ctx.self, delta)
+
+  private def propose(): Unit = {
+    if(!decided && opQueue.nonEmpty) {
+      proposedValue = Some(ctx.self)
+      round += 1
+      promises = ListBuffer.empty;
+      numOfAccepts = 0
+      alive.foreach((actorRef, _) => actorRef ! Prepare(ctx.self, (round, id)))
+    }
+  }
+
+  private def resetForNextRound(): Unit = {
+    round = 0
+    proposedValue = Some(ctx.self)
+    promises = ListBuffer.empty;
+    numOfAccepts = 0
+    decided = false
+    promisedBallot = (0, 0)
+    acceptedBallot = (0, 0)
+    acceptedValue = None
+  }
+
+  private def writeCrdt(): Unit = {
+    if (atomicMap.nonEmpty) {
+      atomicMap.foreach { (key, value) =>
+        crdtstate = crdtstate.put(selfNode, key, value)
+      }
+      atomicMap = Map.empty[String, Int]
+    }
+
+    while (opQueue.nonEmpty) {
+      val op = opQueue.dequeue
+      op match {
+        case opPut(key, value) =>
+          crdtstate = crdtstate.put(selfNode, key, value)
+        case opInc(key) =>
+          crdtstate = crdtstate.put(selfNode, key, crdtstate.get(key).getOrElse(0) + 1)
+      }
+    }
+  }
 
 
   // This is the event handler of the actor, implement its logic here
@@ -255,9 +318,100 @@ class CRDTActorLocks(
 
     case Increment(key) =>
       opQueue.enqueue(opInc(key))
-      alive.foreach { (actorRef, _) =>
-        actorRef ! AcquireLock(ctx.self)
+      propose()
+      Behaviors.same
+
+    case NoLockInc(key) =>
+      crdtstate = crdtstate.put(selfNode, key, crdtstate.get(key).getOrElse(0) + 1)
+      ctx.log.info(s"CRDTActor-$id: incremented $key")
+      ctx.log.info(s"CRDTActor-$id: current state $crdtstate")
+      broadcastAndResetDeltas()
+      Behaviors.same
+
+
+    case Prepare(src, proposalBallot) =>
+      if (promisedBallot._1 < proposalBallot._1) {
+        promisedBallot = proposalBallot
+        src ! Promise(ctx.self, promisedBallot, acceptedBallot, acceptedValue)
       }
+      else {
+        src ! Nack(ctx.self, proposalBallot)
+      }
+      Behaviors.same
+
+    case Accept(src, acc, proposedValue) =>
+      if (promisedBallot._1 <= acc._1) {
+        promisedBallot = acc
+        acceptedBallot = acc
+        acceptedValue = Some(proposedValue)
+        src ! Accepted(ctx.self, acceptedBallot)
+      }
+      else {
+        src ! Nack(ctx.self, acc)
+      }
+      Behaviors.same
+
+
+    case Decided(src, dec) =>
+      if (!decided) {
+        decided = true
+        ctx.self ! C_Decide(dec)
+        alive.foreach((actorRef, _) => actorRef ! C_Decide(dec))
+      }
+      Behaviors.same
+
+    case Promise(src, promiseBallot, acceptedBallot, acceptedValue) =>
+      //ctx.log.info(s"CRDTActor-$id: received promise from $src, promiseBallot: $promiseBallot, acceptedBallot: $acceptedBallot, acceptedValue: $acceptedValue, round: $round, id: $id")
+      if ((round, id) == promiseBallot) {
+        val acceptedElement: ((Int, Int), Option[Any]) = (acceptedBallot, acceptedValue)
+
+        promises += acceptedElement
+        //ctx.log.info(s"CRDTActor-$id: $round,$id = $promiseBallot, promises.size: ${promises.size}, alive/2 + 1: ${alive.size / 2 + 1}")
+        if (promises.size == alive.size / 2 + 1) {
+          val (maxBallot, value) = promises.maxBy(_._1._2)
+          //ctx.log.info(s"CRDTActor-$id: promises $promises")
+          value match{
+            case None => proposedValue = proposedValue
+            case Some(v) => proposedValue = Some(v)
+          }
+          //ctx.log.info(s"CRDTActor-$id: send accept on $proposedValue")
+          //ctx.self ! Accept(ctx.self, (round, id), proposedValue.get)
+          alive.foreach((actorRef, _) => actorRef ! Accept(ctx.self, (round, id), proposedValue.get))
+        }
+      }
+      Behaviors.same
+
+    case Accepted(src, acceptedBallot) =>
+      if ((round, id) == acceptedBallot) {
+        numOfAccepts += 1;
+        if (numOfAccepts == alive.size / 2 + 1) {
+          //ctx.self ! Decided(ctx.self, proposedValue.get)
+          alive.foreach((actorRef, _) => actorRef ! Decided(ctx.self, proposedValue.get))
+        }
+      }
+      Behaviors.same
+
+    case Nack(src, ballot) =>
+      //ctx.log.info(s"CRDTActor-$id: received nack from $src, ballot: $ballot, round: $round, id: $id")
+      if ((round, id) == ballot) {
+        Thread.sleep(10)
+        propose()
+      }
+      Behaviors.same
+
+    case C_Decide(value) =>
+      if (value == ctx.self && opQueue.nonEmpty) {
+        writeCrdt()
+        broadcastAndResetDeltas()
+        ctx.log.info(s"CRDTActor-$id: wrote: $crdtstate")
+        ctx.self ! ReleaseLock
+        alive.foreach((actorRef, _) => actorRef ! ReleaseLock)
+      }
+      Behaviors.same
+
+    case ReleaseLock =>
+      resetForNextRound()
+      propose()
       Behaviors.same
 
   Behaviors.same
