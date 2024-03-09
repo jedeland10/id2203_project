@@ -115,6 +115,10 @@ class CRDTActorLocks(
   private var acceptedBallot: (Int, Int) = (0, 0)
   private var acceptedValue: Option[Any] = None
 
+  // Propose timer
+  private var proposeScheduled: Boolean = false
+  private var proposing: Boolean = false
+
   private def startHeartbeatScheduler(): Unit = {
     ctx.system.scheduler.scheduleWithFixedDelay(
       java.time.Duration.ofMillis(200),
@@ -131,12 +135,24 @@ class CRDTActorLocks(
         alive.foreach {
           case (actorRef, expectedResponseTime) =>
             if (expectedResponseTime < java.time.Instant.now().toEpochMilli) {
-              //ctx.log.info(s"CRDTActor-$id: Actor timed out")
               alive = alive.removed(actorRef)
             }
         }
       },
       ctx.system.executionContext)
+  }
+
+  private def schedulePropose(): Unit = {
+    if(!proposeScheduled) {
+      proposeScheduled = true
+      ctx.system.scheduler.scheduleOnce(
+        java.time.Duration.ofMillis(10),
+        () => {
+          propose()
+          proposeScheduled = false
+        },
+        ctx.system.executionContext)
+    }
   }
 
   // Note: you probably want to modify this method to be more efficient
@@ -162,6 +178,7 @@ class CRDTActorLocks(
 
   private def propose(): Unit = {
     if(!decided && opQueue.nonEmpty) {
+      //proposing = true
       proposedValue = Some(ctx.self)
       round += 1
       promises = ListBuffer.empty;
@@ -318,7 +335,8 @@ class CRDTActorLocks(
 
     case Increment(key) =>
       opQueue.enqueue(opInc(key))
-      propose()
+      schedulePropose()
+      //if (!proposing) schedulePropose()
       Behaviors.same
 
     case NoLockInc(key) =>
@@ -400,6 +418,7 @@ class CRDTActorLocks(
       Behaviors.same
 
     case C_Decide(value) =>
+      //ctx.log.info(s"CRDTActor-$id: decided: $value ballot: $acceptedBallot")
       if (value == ctx.self && opQueue.nonEmpty) {
         writeCrdt()
         broadcastAndResetDeltas()
@@ -411,7 +430,7 @@ class CRDTActorLocks(
 
     case ReleaseLock =>
       resetForNextRound()
-      propose()
+      schedulePropose()
       Behaviors.same
 
   Behaviors.same
