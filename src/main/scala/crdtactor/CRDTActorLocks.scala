@@ -181,14 +181,15 @@ class CRDTActorLocks(
       //proposing = true
       proposedValue = Some(ctx.self)
       round += 1
-      promises = ListBuffer.empty;
+      promises = ListBuffer.empty
       numOfAccepts = 0
+      //ctx.self ! C_Propose((round, id))
       alive.foreach((actorRef, _) => actorRef ! Prepare(ctx.self, (round, id)))
     }
   }
 
   private def resetForNextRound(): Unit = {
-    round = 0
+    //round = 0
     proposedValue = Some(ctx.self)
     promises = ListBuffer.empty;
     numOfAccepts = 0
@@ -393,7 +394,7 @@ class CRDTActorLocks(
             case Some(v) => proposedValue = Some(v)
           }
           //ctx.log.info(s"CRDTActor-$id: send accept on $proposedValue")
-          //ctx.self ! Accept(ctx.self, (round, id), proposedValue.get)
+          ctx.self ! Accept(ctx.self, (round, id), proposedValue.get)
           alive.foreach((actorRef, _) => actorRef ! Accept(ctx.self, (round, id), proposedValue.get))
         }
       }
@@ -403,7 +404,7 @@ class CRDTActorLocks(
       if ((round, id) == acceptedBallot) {
         numOfAccepts += 1;
         if (numOfAccepts == alive.size / 2 + 1) {
-          //ctx.self ! Decided(ctx.self, proposedValue.get)
+          ctx.self ! Decided(ctx.self, proposedValue.get)
           alive.foreach((actorRef, _) => actorRef ! Decided(ctx.self, proposedValue.get))
         }
       }
