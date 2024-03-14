@@ -37,9 +37,10 @@ object CRDTActor {
  case class AckWrite(k: Int) extends Command
 
  case class NackWrite(k: Int) extends Command
-  case class HeartBeat(from: ActorRef[Command]) extends Command
 
-  case class Sleep(time: Long) extends Command
+ case class HeartBeat(from: ActorRef[Command]) extends Command
+
+ case class Sleep(time: Long) extends Command
 
  //case object GetState extends Command //TESTING
 }
@@ -76,6 +77,8 @@ class CRDTActor(
  private val executionContext: ExecutionContext = ctx.system.executionContext
 
  private val hearBeatTimeOut = java.time.Duration.ofMillis(400)
+
+ private var startTime: Long = java.time.Instant.now().toEpochMilli
 
  private var alive = Map.empty[ActorRef[Command], Long]
   private def startHeartbeatScheduler(): Unit = {
@@ -147,7 +150,7 @@ class CRDTActor(
    //ctx.log.info(s"CRDTActor-$id: Inside the commit func with v: " + v)
    if (v != null) {
      if (v._2 < java.time.Instant.now().toEpochMilli && (v._2 + 50) > java.time.Instant.now().toEpochMilli) {
-       ctx.log.info(s"CRDTActor-$id: Never comes here?")
+       //ctx.log.info(s"CRDTActor-$id: Never comes here?")
        //ki = read + 1
        Thread.sleep(50)
        ctx.self ! ConsumeOperation // start consuming operations
@@ -155,11 +158,11 @@ class CRDTActor(
      }
    }
    if (v == (0,0)) { //Add check for time now later
-     ctx.log.info(s"CRDTActor-$id: Not null right")
+     //ctx.log.info(s"CRDTActor-$id: Not null right")
      writeFunc(ki, (id,java.time.Instant.now().toEpochMilli + 100))
    } else if (v._2 < java.time.Instant.now().toEpochMilli) {
-     ctx.log.info(s"CRDTActor-$id: v._2: " + v._2)
-     ctx.log.info(s"CRDTActor-$id: current time: " + java.time.Instant.now().toEpochMilli)
+     //ctx.log.info(s"CRDTActor-$id: v._2: " + v._2)
+     //ctx.log.info(s"CRDTActor-$id: current time: " + java.time.Instant.now().toEpochMilli)
      writeFunc(ki, (id,java.time.Instant.now().toEpochMilli + 100))
    } 
    //else if (v._1 == id) {
@@ -175,15 +178,26 @@ class CRDTActor(
  private def writeCommit(): Unit = {
    //SYNC then do this
    //ctx.log.info(s"CRDTActor-$id: acks: $ackVotes - nacks: $nackVotes")
-   ctx.log.info(s"CRDTActor-$id: Got to commit and ki: " + ki)
-   val key = Utils.randomString()
+   //ctx.log.info(s"CRDTActor-$id: Got to commit and ki: " + ki)
+   val key = "x"
    val value = Utils.randomInt()
-   ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
-   crdtstate = crdtstate.put(selfNode, key, value)
-   ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
-   broadcastAndResetDeltas()
-   ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
-   Behaviors.same
+   //ctx.log.info(s"CRDTActor-$id: Consuming operation $key -> $value")
+   val currentVal: Int = crdtstate.get("x").getOrElse(0)
+   if (currentVal == 100) {
+     val endTime: Long = java.time.Instant.now().toEpochMilli
+     val timeElapsed = endTime - startTime
+     ctx.log.info(s"CRDTActor-$id: Finished adding 100 values in: " + timeElapsed + " ms")
+     ctx.log.info(s"--------------------------------------------------------------------------------------------")
+     Behaviors.stopped
+   } else if (currentVal > 100) {
+     Behaviors.stopped
+   } else {
+     crdtstate = crdtstate.put(selfNode, key, currentVal+1)
+     ctx.log.info(s"CRDTActor-$id: CRDT state: $crdtstate")
+     broadcastAndResetDeltas()
+     ctx.self ! ConsumeOperation // continue consuming operations, loops sortof
+     Behaviors.same
+   }
  }
 
  // This is the event handler of the actor, implement its logic here
@@ -196,16 +210,19 @@ class CRDTActor(
        alive = alive.updated(actorRef, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis))
      startHeartbeatScheduler()
      startTimeoutScheduler()
-     // ctx.self ! ConsumeOperation // start consuming operations
+     ctx.self ! ConsumeOperation // start consuming operations
      Behaviors.same
 
    case ConsumeOperation =>
      //ctx.log.info(s"CRDTActor-$id trying to get lease with ki: " + ki)
+     if (ki == id) {
+       startTime = java.time.Instant.now().toEpochMilli
+     }
      readFunc(ki)
      Behaviors.same
 
    case HeartBeat(from) =>
-     ctx.log.info(s"CRDTActor-$id: got a heartbeat from: " + from)
+     //ctx.log.info(s"CRDTActor-$id: got a heartbeat from: " + from)
      if (!alive.contains(from)) {
        ctx.log.info(s"CRDTActor-$id: rejoined, alive: " + alive)
        ctx.log.info(s"CRDTActor-$id: rejoined, ref: " + from)
@@ -225,7 +242,7 @@ class CRDTActor(
      //AsInstanceOf[ReplicatedDelta[ReplicatedData] 
      //if you don't provide the type the worst case is that they will cast to nothing, so it will break.
      //Do safe casting, if you can't cast it, then you have a problem and discard.
-     ctx.log.info(s"CRDTActor-$id: Merged CRDT state: $crdtstate")
+     //ctx.log.info(s"CRDTActor-$id: Merged CRDT state: $crdtstate")
      Behaviors.same
    
    case Read(k, sender) =>

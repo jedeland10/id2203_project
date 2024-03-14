@@ -337,7 +337,7 @@ class testClass extends munit.FunSuite:
         }
     }*/
 
-
+/*
     test("Fail recovery test") {
         val N: Int = 5
         val nMessages = 1_000_000
@@ -379,4 +379,32 @@ class testClass extends munit.FunSuite:
         Thread.sleep(1500)
 
         assertEquals(100, 100)
+    }*/
+
+    test("Fleases execution") {
+        val N_ACTORS = 4
+
+        Utils.setLoggerLevel("DEBUG")
+
+        val system = ActorSystem("CRDTActor")
+
+        // Create the actors
+        val actors = (0 until N_ACTORS).map { i =>
+            val name = s"CRDTActor-$i"
+            val actorRef = system.spawn (
+                Behaviors.setup[CRDTActor.Command] { ctx => new CRDTActor(i, ctx) },
+                name
+            )
+            i -> actorRef
+        }.toMap
+
+        // Write actor addresses into the global state
+        actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
+
+        // Start the actors
+        actors.foreach((_, actorRef) => actorRef ! CRDTActor.Start)
+
+
+        // Sleep for a few seconds, then quit :)
+        Thread.sleep(10_000)
     }
