@@ -51,6 +51,8 @@ object CRDTActorLocks {
   case class Increment(key: String) extends Command
   case class NoLockInc(key: String) extends Command
 
+  case class PaxosPut(key: String, value: Int) extends Command //Add a value to the CRDT
+
   case class HeartBeat(from: ActorRef[Command]) extends Command
 
   case class Sleep(time: Long) extends Command
@@ -64,7 +66,7 @@ object CRDTActorLocks {
 
   case class Promise(src: ActorRef[Command], promiseBallot: (Int, Int), acceptedBallot: (Int, Int), acceptedValue: Option[Any]) extends Command
 
-  case class Accept(src: ActorRef[Command], acceptBallot: (Int, Int), proposedValue: Any) extends Command
+  case class Accept(src: ActorRef[Command], accBallot: (Int, Int), proposedValue: Any) extends Command
 
   case class Accepted(src: ActorRef[Command], acceptedBallot: (Int, Int)) extends Command
 
@@ -143,10 +145,10 @@ class CRDTActorLocks(
   }
 
   private def schedulePropose(): Unit = {
-    if(!proposeScheduled) {
+    if(!proposeScheduled && opQueue.nonEmpty) {
       proposeScheduled = true
       ctx.system.scheduler.scheduleOnce(
-        java.time.Duration.ofMillis(10),
+        java.time.Duration.ofMillis(50),
         () => {
           propose()
           proposeScheduled = false
@@ -178,24 +180,19 @@ class CRDTActorLocks(
 
   private def propose(): Unit = {
     if(!decided && opQueue.nonEmpty) {
-      //proposing = true
       proposedValue = Some(ctx.self)
       round += 1
       promises = ListBuffer.empty
       numOfAccepts = 0
-      //ctx.self ! C_Propose((round, id))
+      ctx.self ! Prepare(ctx.self, (round, id))
       alive.foreach((actorRef, _) => actorRef ! Prepare(ctx.self, (round, id)))
     }
   }
 
   private def resetForNextRound(): Unit = {
-    //round = 0
-    proposedValue = Some(ctx.self)
-    promises = ListBuffer.empty;
-    numOfAccepts = 0
+    //promises = ListBuffer.empty
+    //numOfAccepts = 0
     decided = false
-    promisedBallot = (0, 0)
-    acceptedBallot = (0, 0)
     acceptedValue = None
   }
 
@@ -337,8 +334,13 @@ class CRDTActorLocks(
     case Increment(key) =>
       opQueue.enqueue(opInc(key))
       schedulePropose()
-      //if (!proposing) schedulePropose()
       Behaviors.same
+
+    case PaxosPut(key, value) =>
+      opQueue.enqueue(opPut(key, value))
+      schedulePropose()
+      Behaviors.same
+
 
     case NoLockInc(key) =>
       crdtstate = crdtstate.put(selfNode, key, crdtstate.get(key).getOrElse(0) + 1)
@@ -358,24 +360,23 @@ class CRDTActorLocks(
       }
       Behaviors.same
 
-    case Accept(src, acc, proposedValue) =>
-      if (promisedBallot._1 <= acc._1) {
-        promisedBallot = acc
-        acceptedBallot = acc
+    case Accept(src, accBallot, proposedValue) =>
+      if (promisedBallot._1 <= accBallot._1) {
+        promisedBallot = accBallot
+        acceptedBallot = accBallot
         acceptedValue = Some(proposedValue)
         src ! Accepted(ctx.self, acceptedBallot)
       }
       else {
-        src ! Nack(ctx.self, acc)
+        src ! Nack(ctx.self, accBallot)
       }
       Behaviors.same
 
-
     case Decided(src, dec) =>
       if (!decided) {
-        decided = true
         ctx.self ! C_Decide(dec)
         alive.foreach((actorRef, _) => actorRef ! C_Decide(dec))
+        decided = true
       }
       Behaviors.same
 
@@ -386,13 +387,13 @@ class CRDTActorLocks(
 
         promises += acceptedElement
         //ctx.log.info(s"CRDTActor-$id: $round,$id = $promiseBallot, promises.size: ${promises.size}, alive/2 + 1: ${alive.size / 2 + 1}")
-        if (promises.size == alive.size / 2 + 1) {
+        if (promises.size == (alive.size + 1)/ 2 + 1) {
           val (maxBallot, value) = promises.maxBy(_._1._2)
           //ctx.log.info(s"CRDTActor-$id: promises $promises")
-          value match{
+          value match
             case None => proposedValue = proposedValue
             case Some(v) => proposedValue = Some(v)
-          }
+
           //ctx.log.info(s"CRDTActor-$id: send accept on $proposedValue")
           ctx.self ! Accept(ctx.self, (round, id), proposedValue.get)
           alive.foreach((actorRef, _) => actorRef ! Accept(ctx.self, (round, id), proposedValue.get))
@@ -403,7 +404,7 @@ class CRDTActorLocks(
     case Accepted(src, acceptedBallot) =>
       if ((round, id) == acceptedBallot) {
         numOfAccepts += 1;
-        if (numOfAccepts == alive.size / 2 + 1) {
+        if (numOfAccepts == (alive.size + 1) / 2 + 1) {
           ctx.self ! Decided(ctx.self, proposedValue.get)
           alive.foreach((actorRef, _) => actorRef ! Decided(ctx.self, proposedValue.get))
         }
@@ -413,17 +414,17 @@ class CRDTActorLocks(
     case Nack(src, ballot) =>
       //ctx.log.info(s"CRDTActor-$id: received nack from $src, ballot: $ballot, round: $round, id: $id")
       if ((round, id) == ballot) {
-        Thread.sleep(10)
-        propose()
+        schedulePropose()
       }
       Behaviors.same
 
     case C_Decide(value) =>
       //ctx.log.info(s"CRDTActor-$id: decided: $value ballot: $acceptedBallot")
-      if (value == ctx.self && opQueue.nonEmpty) {
-        writeCrdt()
-        broadcastAndResetDeltas()
-        ctx.log.info(s"CRDTActor-$id: wrote: $crdtstate")
+      if (value == ctx.self) {
+        if(opQueue.nonEmpty) {
+          writeCrdt()
+          broadcastAndResetDeltas()
+        }
         ctx.self ! ReleaseLock
         alive.foreach((actorRef, _) => actorRef ! ReleaseLock)
       }
@@ -431,7 +432,7 @@ class CRDTActorLocks(
 
     case ReleaseLock =>
       resetForNextRound()
-      schedulePropose()
+      if (opQueue.nonEmpty) schedulePropose()
       Behaviors.same
 
   Behaviors.same

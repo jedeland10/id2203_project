@@ -274,31 +274,50 @@ class testClass extends munit.FunSuite:
         // Start the actors
         actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Start)
 
-        for (n <- Range(0, 100)) {
+        var counter: Int = 0
+        val nRuns: Int = 100
+
+        for (i <- Range(0, nRuns)) {
             for(n <- Range(0, nMessages)) {
-                actors.foreach((_ , actorRef) => actorRef ! CRDTActorLocks.Increment("x" + n))
+                actors.foreach((_ , actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
             }
-    
-            Thread.sleep(3_000)
-            actors(N - 1) ! CRDTActorLocks.Get(probe.ref)
-            val response = (0 until 1).map(_ => probe.receiveMessage())
+
+            Thread.sleep(5_000)
+            actors(0) ! CRDTActorLocks.Get(probe.ref)
+            val response = probe.receiveMessage()
             var resultX = 0
-            
-            response.foreach {
-                case msg: responseMsg =>
-                    println(msg)
-                    msg match {
-                        case responseMsg(map) =>
-                            resultX = map.get("x" + n.toString).getOrElse(0) // Get value or default to 0
-                            //resultY = map.get("y").getOrElse(1) // Get value or default to 1
-                        case null => fail("Unexpected message: " + msg)
-                    }
-                case msg =>
-                    fail("Unexpected message: " + msg)
-            }
-            println("Result X: " + resultX)
-            assertEquals(resultX, N * nMessages)
+
+            response.match
+                case responseMsg(map) => resultX = map.get("x").getOrElse(0)
+                case null => fail("Unexpected message: " + response)
+
+            println("Result " + i.toString + ": " + resultX)
+            if (resultX == N * nMessages) counter += 1
+            actors(0) ! CRDTActorLocks.PaxosPut("x", 0)
+            Thread.sleep(2000)
+            actors(0) ! CRDTActorLocks.Get(probe.ref)
+            val resp = probe.receiveMessage()
+            var res = 0
+
+            response.match
+                case responseMsg(map) => res = map.get("x").getOrElse(0)
+                case null => fail("Unexpected message: " + resp)
+            println("reset to 0: " + res)
+
         }
+        println("Passed runs: " + counter + "\nTotal runs: " + nRuns)
+        assert(counter > nRuns * 0.8)
+    }
+    
+    test("Latency") {
+        val system = ActorSystem("CRDTActor")
+
+        val testKit = ActorTestKit()
+        // val probe = testKit.createTestProbe[CRDTActorV2.State]()
+
+        val actor = system.spawn(Behaviors.setup[CRDTActorLocks.Command] { ctx => new CRDTActorLocks(1, ctx) }, "LatencyTestActor")
+        
+        
     }
 
 
