@@ -200,21 +200,32 @@ class testClass extends munit.FunSuite:
 
         actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Start)
 
-        for (n <- Range(0, nMessages)) {
-            actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
+        var counter = 0
+        val nRounds = 10
+
+        for (n <- Range(0, nRounds)) {
+            for (n <- Range(0, nMessages)) {
+                actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
+            }
+
+            Thread.sleep(10_000)
+            actors(0) ! CRDTActorLocks.Get(probe.ref)
+            val response = probe.receiveMessage()
+            var resultX = 0
+
+            response.match
+                case responseMsg(map) => resultX = map.get("x").getOrElse(0)
+                case null => fail("Unexpected message: " + response)
+
+            println(s"Result round $n: " + resultX)
+            if (resultX == nMessages * N) counter = counter + 1
+
+            actors(0) ! CRDTActorLocks.Put("x", 0)
+            Thread.sleep(1000)
+
         }
-
-        Thread.sleep(10_000)
-        actors(0) ! CRDTActorLocks.Get(probe.ref)
-        val response = probe.receiveMessage()
-        var resultX = 0
-
-        response.match
-            case responseMsg(map) => resultX = map.get("x").getOrElse(0)
-            case null => fail("Unexpected message: " + response)
-
-        assertEquals(resultX, N * nMessages)
-
+        println("Succeeded rounds: " + counter + "\nTotal rounds: " + nRounds)
+        assertEquals(counter, nRounds)
     }
 
 
