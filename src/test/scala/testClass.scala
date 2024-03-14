@@ -382,3 +382,41 @@ class testClass extends munit.FunSuite:
         // Sleep for a few seconds, then quit :)
         Thread.sleep(12_000)
     }*/
+/*
+    test("CRDT with regular map instead of LWWMap") {
+        val N: Int = 2
+        val system = ActorSystem("CRDTActor")
+
+        val testKit = ActorTestKit()
+
+        val actors = (0 until N).map { i =>
+            val name = s"CRDTActor-$i"
+            val actorRef = system.spawn(
+                Behaviors.setup[CRDTActorMap.Command] { ctx => new CRDTActorMap(i, ctx) },
+                name
+            )
+            i -> actorRef
+        }.toMap
+
+        val probe = testKit.createTestProbe[CRDTActorMap.Command]()
+        actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
+        // Start the actors
+        actors.foreach((_, actorRef) => actorRef ! CRDTActorMap.Start)
+
+        actors(0) ! CRDTActorMap.Put("amount0", 200)
+        //actors(1) ! CRDTActorMap.Put("amount1", 100)
+        Thread.sleep(1000)
+        println("-----------------------------------------------------")
+        //actors(0) ! CRDTActorMap.Get(probe.ref)
+        actors(1) ! CRDTActorMap.Get(probe.ref)
+        Thread.sleep(1000)
+        actors(1) ! CRDTActorMap.Put("amount0", 300)
+        //actors(1) ! CRDTActorMap.Put("amount1", 100)
+        Thread.sleep(1000)
+        println("-----------------------------------------------------")
+        //actors(0) ! CRDTActorMap.Get(probe.ref)
+        actors(0) ! CRDTActorMap.Get(probe.ref)
+        Thread.sleep(1000)
+
+        assertEquals(150, 150)
+    }*/
