@@ -18,6 +18,7 @@ object CRDTActorLocks {
   sealed trait Operation
   case class opPut(key: String, value: Int) extends Operation
   case class opInc(key: String) extends Operation
+  case class opTestPut(key: String, value: Int) extends Operation
   // The type of messages that the actor can handle
   sealed trait Command
 
@@ -51,7 +52,10 @@ object CRDTActorLocks {
   case class Increment(key: String) extends Command
   case class NoLockInc(key: String) extends Command
 
-  case class PaxosPut(key: String, value: Int) extends Command //Add a value to the CRDT
+  case class PaxosPut(key: String, value: Int) extends Command
+  case class TestPutLatency(key: String, value: Int) extends Command
+  case class GetLatencyBenchmark(replyTo: ActorRef[Command]) extends Command
+  case class ResponseLatencyBenchmark(msg: ListBuffer[Long]) extends Command
 
   case class HeartBeat(from: ActorRef[Command]) extends Command
 
@@ -123,6 +127,8 @@ class CRDTActorLocks(
   private var proposeScheduled: Boolean = false
   private var proposing: Boolean = false
 
+  private var latencyBenchmark: ListBuffer[Long] = ListBuffer.empty[Long]
+
   private def startHeartbeatScheduler(): Unit = {
     ctx.system.scheduler.scheduleWithFixedDelay(
       java.time.Duration.ofMillis(200),
@@ -150,7 +156,7 @@ class CRDTActorLocks(
     if(!proposeScheduled && opQueue.nonEmpty) {
       proposeScheduled = true
       ctx.system.scheduler.scheduleOnce(
-        java.time.Duration.ofMillis(50),
+        java.time.Duration.ofMillis((alive.size + 1) * 10),
         () => {
           propose()
           proposeScheduled = false
@@ -192,8 +198,6 @@ class CRDTActorLocks(
   }
 
   private def resetForNextRound(): Unit = {
-    //promises = ListBuffer.empty
-    //numOfAccepts = 0
     decided = false
     acceptedValue = None
   }
@@ -213,6 +217,8 @@ class CRDTActorLocks(
           crdtstate = crdtstate.put(selfNode, key, value)
         case opInc(key) =>
           crdtstate = crdtstate.put(selfNode, key, crdtstate.get(key).getOrElse(0) + 1)
+        case opTestPut(key, value) =>
+          crdtstate = crdtstate.put(selfNode, key, value)
       }
     }
   }
@@ -240,7 +246,6 @@ class CRDTActorLocks(
 
     case HeartBeat(from) =>
       if (!alive.contains(from)) {
-        ctx.log.info(s"CRDTActor-$id received heartbeat from $from who has been dead for a while.")
         sendDelta(from)
       }
       alive = alive.updated(from, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis)
@@ -271,7 +276,6 @@ class CRDTActorLocks(
 
     case Get(replyTo) =>
       replyTo ! responseMsg(crdtstate) //Send the state to the requester
-      ctx.log.info(s"$crdtstate")
       Behaviors.same
 
     case AcquireLock(requester) =>
@@ -353,6 +357,16 @@ class CRDTActorLocks(
       schedulePropose()
       Behaviors.same
 
+    case TestPutLatency(key, value) =>
+      latencyBenchmark = latencyBenchmark.appended(java.time.Instant.now().toEpochMilli)
+      opQueue.enqueue(opTestPut(key, value))
+      schedulePropose()
+      Behaviors.same
+
+    case GetLatencyBenchmark(replyTo) =>
+      replyTo ! ResponseLatencyBenchmark(latencyBenchmark)
+      Behaviors.same
+
 
     case NoLockInc(key) =>
       crdtstate = crdtstate.put(selfNode, key, crdtstate.get(key).getOrElse(0) + 1)
@@ -393,20 +407,16 @@ class CRDTActorLocks(
       Behaviors.same
 
     case Promise(src, promiseBallot, acceptedBallot, acceptedValue) =>
-      //ctx.log.info(s"CRDTActor-$id: received promise from $src, promiseBallot: $promiseBallot, acceptedBallot: $acceptedBallot, acceptedValue: $acceptedValue, round: $round, id: $id")
       if ((round, id) == promiseBallot) {
         val acceptedElement: ((Int, Int), Option[Any]) = (acceptedBallot, acceptedValue)
 
         promises += acceptedElement
-        //ctx.log.info(s"CRDTActor-$id: $round,$id = $promiseBallot, promises.size: ${promises.size}, alive/2 + 1: ${alive.size / 2 + 1}")
         if (promises.size == (alive.size + 1)/ 2 + 1) {
           val (maxBallot, value) = promises.maxBy(_._1._2)
-          //ctx.log.info(s"CRDTActor-$id: promises $promises")
           value match
             case None => proposedValue = proposedValue
             case Some(v) => proposedValue = Some(v)
 
-          //ctx.log.info(s"CRDTActor-$id: send accept on $proposedValue")
           ctx.self ! Accept(ctx.self, (round, id), proposedValue.get)
           alive.foreach((actorRef, _) => actorRef ! Accept(ctx.self, (round, id), proposedValue.get))
         }
@@ -424,14 +434,12 @@ class CRDTActorLocks(
       Behaviors.same
 
     case Nack(src, ballot) =>
-      //ctx.log.info(s"CRDTActor-$id: received nack from $src, ballot: $ballot, round: $round, id: $id")
       if ((round, id) == ballot) {
         schedulePropose()
       }
       Behaviors.same
 
     case C_Decide(value) =>
-      //ctx.log.info(s"CRDTActor-$id: decided: $value ballot: $acceptedBallot")
       if (value == ctx.self) {
         if(opQueue.nonEmpty) {
           writeCrdt()
