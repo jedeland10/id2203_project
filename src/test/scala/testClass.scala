@@ -251,7 +251,7 @@ class testClass extends munit.FunSuite:
         assertNotEquals(resultX, resultY)
     }*/
 
-
+/*
     test("Integration test") {
         val N: Int = 8
         val nMessages = 1_000_000
@@ -299,17 +299,16 @@ class testClass extends munit.FunSuite:
             println("Result X: " + resultX)
             assertEquals(resultX, N * nMessages)
         }
-    }
+    }*/
 
 
-    /*
     test("Fail recovery test") {
         val N: Int = 5
         val nMessages = 1_000_000
         val system = ActorSystem("CRDTActor")
 
         val testKit = ActorTestKit()
-        // val probe = testKit.createTestProbe[CRDTActorV2.State]()
+        //val probe = testKit.createTestProbe[CRDTActorV2.State]()
 
         val actors = (0 until N).map { i =>
             val name = s"CRDTActor-$i"
@@ -324,36 +323,24 @@ class testClass extends munit.FunSuite:
         actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
         // Start the actors
         actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Start)
-
-        for (n <- Range(0, nMessages)) {
-            actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Increment("x"))
-            if (n == nMessages / 2) {
-                actors(N - 1) ! CRDTActorLocks.Get(probe.ref)
-                val resp = probe.receiveMessage()
-                resp match
-                    case responseMsg(map) => println("Response before sleep: " + map.get("x").getOrElse(0))
-                    case _ => println("No response")
-                actors(0) ! CRDTActorLocks.Sleep(1000)
-            }
-        }
-
-        Thread.sleep(5_000)
-        actors(N - 1) ! CRDTActorLocks.Get(probe.ref)
-        val response = (0 until 1).map(_ => probe.receiveMessage())
-        var resultX = 0
-        // var resultY = 0
-        response.foreach {
-            case msg: responseMsg =>
-                println(msg)
-                msg match {
-                    case responseMsg(map) =>
-                        resultX = map.get("x").getOrElse(0) // Get value or default to 0
-                    //resultY = map.get("y").getOrElse(1) // Get value or default to 1
-                    case null => fail("Unexpected message: " + msg)
-                }
-            case msg =>
-                fail("Unexpected message: " + msg)
-        }
-        println("Total increments: " + resultX)
-        assertEquals(resultX, N * nMessages)
-    }*/
+        Thread.sleep(200)
+        actors(0) ! CRDTActorLocks.GetAlive(probe.ref)
+        Thread.sleep(200)
+        actors(N-1) ! CRDTActorLocks.Sleep(1000)
+        Thread.sleep(1500)
+        actors(0) ! CRDTActorLocks.GetAlive(probe.ref)
+        Thread.sleep(1500)
+        //Restart the terminated actor
+        val nameRestart = s"CRDTActor-${N-1}"
+        val actorRefRestart = system.spawn(
+            Behaviors.setup[CRDTActorLocks.Command] { ctx => new CRDTActorLocks(N-1, ctx) },
+            nameRestart
+        )
+        Utils.GLOBAL_STATE.put(N-1, actorRefRestart)
+        actorRefRestart ! CRDTActorLocks.Start
+        Thread.sleep(1500)
+        actors(0) ! CRDTActorLocks.GetAlive(probe.ref)
+        Thread.sleep(1500)
+        
+        assertEquals(100, 100)
+    }

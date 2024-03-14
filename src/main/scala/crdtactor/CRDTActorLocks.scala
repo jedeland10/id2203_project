@@ -55,6 +55,8 @@ object CRDTActorLocks {
 
   case class Sleep(time: Long) extends Command
 
+  case class GetAlive(replyTo: ActorRef[Command]) extends Command
+
   case object ReleaseLock extends Command
 
   // Consensus messages
@@ -241,13 +243,23 @@ class CRDTActorLocks(
 
     case HeartBeat(from) =>
       if (!alive.contains(from)) {
+        ctx.log.info(s"CRDTActor-$id received heartbeat from $from who has been dead for a while.")
         sendDelta(from)
       }
       alive = alive.updated(from, java.time.Instant.now().toEpochMilli + hearBeatTimeOut.toMillis)
       Behaviors.same
 
     case Sleep(time) =>
-      Thread.sleep(time)
+      //crdtstate = ddata.LWWMap.empty[String, Int]
+      //Throw an exception to test the fail and recovery
+      //throw new Exception("TestFailure")
+      //Thread.sleep(time)
+      ctx.log.info(s"CRDTActor-$id I will now terminate myself")
+      //Thread.sleep(5000)
+      Behaviors.stopped
+
+    case GetAlive(replyTo) =>
+      ctx.log.info(s"Current size of alive is ${alive.size}")
       Behaviors.same
 
     case Put(key, value) => //Tries to add a value into the CRDT
