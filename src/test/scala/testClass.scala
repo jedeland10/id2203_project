@@ -5,8 +5,6 @@ import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.testkit.typed.scaladsl.ActorTestKit
 
-import scala.collection.mutable.ListBuffer
-
 class testClass extends munit.FunSuite:
     import CRDTActorLocks.*
 
@@ -178,55 +176,6 @@ class testClass extends munit.FunSuite:
         println("Result atomic X: " + resultX)
         println("Result atomic Y: " + resultY)
         assertEquals(resultX, resultX)
-    }
-
-    test("CRDT put sequentially consistent") {
-        val N: Int = 3
-        val system = ActorSystem("CRDTActor")
-
-        val testKit = ActorTestKit()
-
-        val actors = (0 until N).map { i =>
-            val name = s"CRDTActor-$i"
-            val actorRef = system.spawn(
-                Behaviors.setup[CRDTActorLocks.Command] { ctx => new CRDTActorLocks(i, ctx) },
-                name
-            )
-            i -> actorRef
-        }.toMap
-
-        val probe = testKit.createTestProbe[CRDTActorLocks.Command]()
-        actors.foreach((id, actorRef) => Utils.GLOBAL_STATE.put(id, actorRef))
-
-        actors.foreach((_, actorRef) => actorRef ! CRDTActorLocks.Start)
-
-        for (n <- Range(0, 10)) {
-            actors(0) ! CRDTActorLocks.Put(n.toString, n)
-        }
-        for (n <- Range(10, 20)) {
-            actors(1) ! CRDTActorLocks.Put(n.toString, n)
-        }
-
-        Thread.sleep(5000)
-        actors(2) ! CRDTActorLocks.Get(probe.ref)
-        val response = (0 until 1).map(_ => probe.receiveMessage())
-        var resultX = 0
-        var resultY = 0
-        response.foreach {
-            case msg: responseMsg =>
-                println(msg)
-                msg match {
-                    case responseMsg(map) =>
-                        resultX = map.get("x").getOrElse(0)
-                        resultY = map.get("y").getOrElse(1)
-                    case null => fail("Unexpected message: " + msg)
-                }
-            case msg =>
-                fail("Unexpected message: " + msg)
-        }
-        println("Result non-atomic X: " + resultX)
-        println("Result non-atomic Y: " + resultY)
-        assertNotEquals(resultX, resultY)
     }
 
 

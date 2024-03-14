@@ -7,12 +7,12 @@ ThisBuild / scalaVersion := "3.3.1"
 lazy val root = project
   .in(file("."))
   .settings(
-    name := "id2203-vt24-course-project-crdts",
-    libraryDependencies += "org.apache.pekko" %% "pekko-actor-typed" % pekkoVersion,
-    libraryDependencies += "org.apache.pekko" %% "pekko-cluster-typed" % pekkoVersion,
-    libraryDependencies += "com.novocode" % "junit-interface" % junitInterfaceVersion % "test",
-    libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackversion,
-    libraryDependencies += "org.scalameta" %% "munit" % "1.0.0-M7" % Test, //Old one
-    libraryDependencies += "org.apache.pekko" %% "pekko-actor-testkit-typed" % "1.0.2" % Test, //New one
-    libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.14" % Test, //New one
+      name := "id2203-vt24-course-project-crdts",
+      libraryDependencies += "org.apache.pekko" %% "pekko-actor-typed" % pekkoVersion,
+      libraryDependencies += "org.apache.pekko" %% "pekko-cluster-typed" % pekkoVersion,
+      libraryDependencies += "com.novocode" % "junit-interface" % junitInterfaceVersion % "test",
+      libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackversion,
+      libraryDependencies += "org.scalameta" %% "munit" % "1.0.0-M7" % Test, //Old one
+      libraryDependencies += "org.apache.pekko" %% "pekko-actor-testkit-typed" % "1.0.2" % Test, //New one
+      libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.14" % Test, //New one
   )
