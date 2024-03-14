@@ -24,7 +24,7 @@ object Bootstrap {
 
   // Startup the actors and execute the workload
   def apply(): Unit =
-    val N_ACTORS = 3
+    val N_ACTORS = 4
 
     Utils.setLoggerLevel("DEBUG")
 
@@ -48,7 +48,7 @@ object Bootstrap {
 
 
     // Sleep for a few seconds, then quit :)
-    Thread.sleep(2500)
+    Thread.sleep(20_000)
 
     // Force quit
     System.exit(0)
